@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=hpwarn
-Comment=SWTOR HP warning overlay with history dashboard
-Exec=hpwarn
+Name=hpwarn overlay
+Comment=hpwarn's plain-window HP overlay (X11, or the Wayland fallback when layer-shell isn't available)
+Exec=hpwarn --no-dashboard
 Icon=hpwarn
 Terminal=false
 Categories=Game;Utility;
-StartupWMClass=hpwarn-dashboard
-NoDisplay=false
+StartupWMClass=hpwarn
+NoDisplay=true

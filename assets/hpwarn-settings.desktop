@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=hpwarn settings
+Comment=Lightweight hpwarn config editor (no overlay, no watcher)
+Exec=hpwarn --configure
+Icon=hpwarn
+Terminal=false
+Categories=Game;Utility;
+StartupWMClass=hpwarn-settings
+NoDisplay=false

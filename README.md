@@ -44,11 +44,18 @@ install -Dm755 target/release/hpwarn ~/.local/bin/hpwarn
 
 ### Giving it a proper icon
 
-Without this step, your taskbar/app switcher will likely show a generic
+Without this step, your taskbar/launcher/alt-tab will likely show a generic
 fallback icon instead of hpwarn's own. hpwarn's windows do carry an
 embedded icon, but on Wayland a window can't hand the compositor pixel data
-for its own icon (there's no protocol for it) - the taskbar instead looks
-one up via a `.desktop` file's `Icon=` entry, matched to the window. Run:
+for its own icon (there's no protocol for it, and `winit`, hpwarn's GUI
+toolkit, doesn't implement the newer `xdg_toplevel_icon_v1` extension some
+compositors support for this either) - the shell instead resolves a
+*running window's* icon by matching its `app_id` to an installed `.desktop`
+file, and that match only works reliably when the `.desktop` file's own
+filename equals `<app_id>.desktop`. hpwarn's three windows (dashboard,
+settings, overlay) each have a different `app_id` on purpose (so e.g. an
+"always on top" window rule only catches the overlay, not the dashboard),
+so there are three small `.desktop` files for this. Run:
 
 ```sh
 ./install-icon.sh
@@ -56,10 +63,11 @@ one up via a `.desktop` file's `Icon=` entry, matched to the window. Run:
 
 once (after building, so it can find `target/release/hpwarn`, or after
 installing hpwarn onto your `$PATH` as above). It installs the icon into
-`~/.local/share/icons/hicolor/*/apps/hpwarn.png` and a matching entry into
-`~/.local/share/applications/hpwarn.desktop`, and tries to refresh the
-relevant caches. You may need to restart hpwarn (and occasionally
-`plasmashell`) to see it update.
+`~/.local/share/icons/hicolor/*/apps/hpwarn.png` and the three `.desktop`
+entries into `~/.local/share/applications/`, and tries to refresh the
+relevant caches. **Fully quit and restart hpwarn afterwards** - a window's
+icon is resolved once, when it first appears, so an already-running hpwarn
+won't update live, even after the install script runs.
 
 ## First-time setup
 
