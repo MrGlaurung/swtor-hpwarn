@@ -42,6 +42,25 @@ The binary is `target/release/hpwarn`. Copy it anywhere on your `$PATH`, e.g.:
 install -Dm755 target/release/hpwarn ~/.local/bin/hpwarn
 ```
 
+### Giving it a proper icon
+
+Without this step, your taskbar/app switcher will likely show a generic
+fallback icon instead of hpwarn's own. hpwarn's windows do carry an
+embedded icon, but on Wayland a window can't hand the compositor pixel data
+for its own icon (there's no protocol for it) - the taskbar instead looks
+one up via a `.desktop` file's `Icon=` entry, matched to the window. Run:
+
+```sh
+./install-icon.sh
+```
+
+once (after building, so it can find `target/release/hpwarn`, or after
+installing hpwarn onto your `$PATH` as above). It installs the icon into
+`~/.local/share/icons/hicolor/*/apps/hpwarn.png` and a matching entry into
+`~/.local/share/applications/hpwarn.desktop`, and tries to refresh the
+relevant caches. You may need to restart hpwarn (and occasionally
+`plasmashell`) to see it update.
+
 ## First-time setup
 
 ```sh

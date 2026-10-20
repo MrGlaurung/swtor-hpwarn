@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=hpwarn
+Comment=SWTOR HP warning overlay with history dashboard
+Exec=hpwarn
+Icon=hpwarn
+Terminal=false
+Categories=Game;Utility;
+StartupWMClass=hpwarn-dashboard
+NoDisplay=false

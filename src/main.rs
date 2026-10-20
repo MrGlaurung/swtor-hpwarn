@@ -15,6 +15,25 @@ use state::SharedState;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The app icon (a sci-fi HUD badge), embedded so every window shows it
+/// without relying on an external file being present at runtime. This sets
+/// the window icon directly (honoured by X11/most window managers); on
+/// Wayland, the taskbar icon instead comes from a matching .desktop file's
+/// `Icon=` entry (see `assets/hpwarn.desktop` and `install-icon.sh`), since
+/// Wayland has no protocol for a window to hand the compositor pixel data
+/// for its icon.
+static ICON_PNG: &[u8] = include_bytes!("../assets/icons/hpwarn-256.png");
+
+fn app_icon() -> Option<Arc<egui::IconData>> {
+    match eframe::icon_data::from_png_bytes(ICON_PNG) {
+        Ok(icon) => Some(Arc::new(icon)),
+        Err(e) => {
+            eprintln!("hpwarn: failed to load embedded icon: {e}");
+            None
+        }
+    }
+}
+
 /// hpwarn: shows your SWTOR HP% when it drops at/below a threshold, beeps
 /// once each time you cross from above it to at-or-below it, and keeps a
 /// dashboard with your HP history and curve.
@@ -109,10 +128,18 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_configure(config_path: PathBuf) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([520.0, 480.0])
+        .with_title("hpwarn settings")
+        // Its own app_id, distinct from "hpwarn" (the overlay) and
+        // "hpwarn-dashboard" (see run_dashboard for why this matters).
+        .with_app_id("hpwarn-settings")
+        .with_window_level(egui::WindowLevel::Normal);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 480.0])
-            .with_title("hpwarn settings"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -125,24 +152,28 @@ fn run_configure(config_path: PathBuf) -> eframe::Result<()> {
 /// The always-on dashboard: configuration on the left, HP history + curve
 /// on the right. This is what `hpwarn` shows by default.
 fn run_dashboard(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([900.0, 600.0])
+        .with_title("hpwarn dashboard")
+        // Give this window its own app_id (Wayland) / window class,
+        // distinct from the overlay's "hpwarn". The overlay used to be
+        // a plain window kept on top via a desktop-environment window
+        // rule (e.g. KDE's "Keep above" matched to app_id "hpwarn")
+        // before it became a native Wayland layer-shell surface; if
+        // this window reused that same id/class, a rule like that
+        // would also catch the dashboard and keep *it* on top too,
+        // which isn't wanted - only the HP warning itself should float
+        // above everything.
+        .with_app_id("hpwarn-dashboard")
+        // Explicit, in case anything upstream of this (session/compositor
+        // defaults, a leftover window rule matched some other way) would
+        // otherwise make it come up "always on top".
+        .with_window_level(egui::WindowLevel::Normal);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 600.0])
-            .with_title("hpwarn dashboard")
-            // Give this window its own app_id (Wayland) / window class,
-            // distinct from the overlay's "hpwarn". The overlay used to be
-            // a plain window kept on top via a desktop-environment window
-            // rule (e.g. KDE's "Keep above" matched to app_id "hpwarn")
-            // before it became a native Wayland layer-shell surface; if
-            // this window reused that same id/class, a rule like that
-            // would also catch the dashboard and keep *it* on top too,
-            // which isn't wanted - only the HP warning itself should float
-            // above everything.
-            .with_app_id("hpwarn-dashboard")
-            // Explicit, in case anything upstream of this (session/compositor
-            // defaults, a leftover window rule matched some other way) would
-            // otherwise make it come up "always on top".
-            .with_window_level(egui::WindowLevel::Normal),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -155,17 +186,21 @@ fn run_dashboard(shared: Arc<SharedState>, config_path: PathBuf, config: Config)
 /// The plain eframe/winit overlay: used on X11, and as a fallback on
 /// Wayland compositors that don't support wlr-layer-shell.
 fn run_overlay(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([420.0, 90.0])
+        .with_position([config.pos_x, config.pos_y])
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top()
+        .with_resizable(false)
+        .with_title("hpwarn")
+        .with_app_id("hpwarn")
+        .with_taskbar(false);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([420.0, 90.0])
-            .with_position([config.pos_x, config.pos_y])
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_always_on_top()
-            .with_resizable(false)
-            .with_title("hpwarn")
-            .with_app_id("hpwarn")
-            .with_taskbar(false),
+        viewport,
         ..Default::default()
     };
 
