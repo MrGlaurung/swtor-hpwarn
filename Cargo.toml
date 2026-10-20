@@ -1,0 +1,32 @@
+[package]
+name = "hpwarn"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal SWTOR HP warning overlay: shows your HP% when it drops below a threshold and beeps once."
+
+[[bin]]
+name = "hpwarn"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.29"
+egui_plot = "0.29"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+regex = "1"
+dirs = "5"
+rodio = { version = "0.19", default-features = false }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+ab_glyph = "0.2"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+rustix = { version = "0.38", features = ["fs", "mm"] }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3
+lto = true

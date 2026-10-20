@@ -1,0 +1,11 @@
+DejaVuSansMono.ttf is part of the DejaVu Fonts project, derived from the
+Bitstream Vera Fonts and released under a permissive license that explicitly
+allows embedding/bundling/redistribution (with or without modification),
+including in binary form, without royalty.
+
+Full license text: https://dejavu-fonts.github.io/License.html
+
+It is used here only as a sane built-in default so hpwarn's Wayland
+layer-shell overlay (which renders text itself, without a toolkit) always
+has a font to draw with out of the box. You can still point `font_file` in
+~/.config/hpwarn/config.toml at any other .ttf/.otf you own instead.
