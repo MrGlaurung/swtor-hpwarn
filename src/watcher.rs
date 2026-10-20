@@ -229,12 +229,14 @@ fn feed_bytes(
                 if sample.cur != prev_cur {
                     let delta = sample.cur as i64 - prev_cur as i64;
                     let label = format_change_label(delta, &sample.change);
+                    let timestamp = format_timestamp(&sample.time);
                     shared.push_history(HistoryEntry {
                         pct,
                         cur: sample.cur,
                         max: sample.max,
                         delta,
                         label,
+                        timestamp,
                     });
                     shared.push_curve_point(pct);
                 }
@@ -274,5 +276,39 @@ fn format_change_label(delta: i64, change: &Option<crate::parser::HpChange>) -> 
             c.source, c.ability
         ),
         None => format!("{sign}{magnitude} hp"),
+    }
+}
+
+/// Formats a history row's timestamp as "YYYYMMDD HH:MM:SS.cc", e.g.
+/// "20261020 17:30:42.12".
+///
+/// The combat log line itself only carries a time-of-day ("20:20:08.374"),
+/// never a date, so the date is today's local date. That's correct for the
+/// overwhelmingly common case (watching a live log as it's written); it
+/// would only be wrong if hpwarn were pointed at an old log file that spans
+/// a date boundary relative to when it's being read.
+fn format_timestamp(log_time: &str) -> String {
+    let date = chrono::Local::now().format("%Y%m%d");
+
+    // "HH:MM:SS.mmm" -> "HH:MM:SS" + centiseconds (first two digits of the
+    // millisecond field, i.e. milliseconds / 10).
+    let (hms, millis_str) = log_time.split_once('.').unwrap_or((log_time, "0"));
+    let millis: u32 = millis_str.parse().unwrap_or(0);
+    let centis = millis / 10;
+
+    format!("{date} {hms}.{centis:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_timestamp_with_todays_date_and_centiseconds() {
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+        assert_eq!(format_timestamp("17:30:42.123"), format!("{today} 17:30:42.12"));
+        // Single/zero-digit millisecond fields still produce 2-digit centis.
+        assert_eq!(format_timestamp("00:00:00.005"), format!("{today} 00:00:00.00"));
+        assert_eq!(format_timestamp("09:08:07.090"), format!("{today} 09:08:07.09"));
     }
 }

@@ -23,6 +23,8 @@ pub struct HistoryEntry {
     /// ability" or "-17000 hp from Republic Grunts Critical Smash ability",
     /// or just "-230 hp" when no ability/source could be attributed.
     pub label: String,
+    /// When this change was logged, formatted "YYYYMMDD HH:MM:SS.cc".
+    pub timestamp: String,
 }
 
 /// State shared between the background log-watcher thread and the UI

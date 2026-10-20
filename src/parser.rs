@@ -8,6 +8,10 @@ pub struct HpSample {
     pub cur: u64,
     pub max: u64,
     pub change: Option<HpChange>,
+    /// The line's own time-of-day, exactly as logged, e.g. "20:20:08.374".
+    /// SWTOR's combat log doesn't carry a date on each line, only the
+    /// filename does, so pairing this with a date is the caller's job.
+    pub time: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +57,7 @@ impl LogParser {
     /// current HP.
     pub fn process_line(&mut self, line: &str) -> Option<HpSample> {
         let mut groups = self.groups_re.captures_iter(line);
-        let _time = groups.next()?;
+        let time = groups.next()?.get(1)?.as_str().to_string();
         let source = groups.next()?.get(1)?.as_str();
         let target = groups.next()?.get(1)?.as_str();
         let ability_field = groups.next()?.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -132,7 +136,7 @@ impl LogParser {
             });
         }
 
-        Some(HpSample { cur, max, change })
+        Some(HpSample { cur, max, change, time })
     }
 
     /// Parses an entity field into (full_name_tag, current_hp, max_hp).

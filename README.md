@@ -98,9 +98,12 @@ By default, running `hpwarn` opens a window split into two parts:
   amount and (when the log identifies it) the ability and source, e.g.:
 
   ```
-  +10496 hp from Shae Vizla Kolto Drip ability
-  -6503 hp from Annihilation Droid XRR-3 Burning ability
+  20261020 17:30:42.12  +10496 hp from Shae Vizla Kolto Drip ability
+  20261020 17:30:48.90  -6503 hp from Annihilation Droid XRR-3 Burning ability
   ```
+
+  The timestamp is `YYYYMMDD HH:MM:SS.cc` (centiseconds), using the log
+  line's own time-of-day and today's date.
 
   The curve only gets a new point when your HP actually changes — it isn't
   sampled on a timer — and both the curve and the list keep the most recent

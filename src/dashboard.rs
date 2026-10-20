@@ -192,6 +192,9 @@ impl DashboardApp {
                         egui::Color32::from_rgb(230, 90, 90)
                     };
                     ui.horizontal(|ui| {
+                        ui.monospace(
+                            egui::RichText::new(&entry.timestamp).color(egui::Color32::GRAY),
+                        );
                         ui.colored_label(color, &entry.label);
                         ui.weak(format!("({} / {} - {}%)", entry.cur, entry.max, entry.pct));
                     });
