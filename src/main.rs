@@ -128,7 +128,21 @@ fn run_dashboard(shared: Arc<SharedState>, config_path: PathBuf, config: Config)
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 600.0])
-            .with_title("hpwarn"),
+            .with_title("hpwarn dashboard")
+            // Give this window its own app_id (Wayland) / window class,
+            // distinct from the overlay's "hpwarn". The overlay used to be
+            // a plain window kept on top via a desktop-environment window
+            // rule (e.g. KDE's "Keep above" matched to app_id "hpwarn")
+            // before it became a native Wayland layer-shell surface; if
+            // this window reused that same id/class, a rule like that
+            // would also catch the dashboard and keep *it* on top too,
+            // which isn't wanted - only the HP warning itself should float
+            // above everything.
+            .with_app_id("hpwarn-dashboard")
+            // Explicit, in case anything upstream of this (session/compositor
+            // defaults, a leftover window rule matched some other way) would
+            // otherwise make it come up "always on top".
+            .with_window_level(egui::WindowLevel::Normal),
         ..Default::default()
     };
     eframe::run_native(
