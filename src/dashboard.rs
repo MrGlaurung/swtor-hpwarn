@@ -1,7 +1,7 @@
 use crate::config::{Config, FontStyle};
 use crate::state::SharedState;
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{HLine, Line, Plot, PlotPoints};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +15,11 @@ pub struct DashboardApp {
     config: Config,
     shared: Arc<SharedState>,
     saved_notice: Option<Instant>,
+    /// Which font_file path (if any) has been loaded into this window's
+    /// egui context already, so the preview actually renders in the
+    /// selected custom font instead of always falling back to egui's
+    /// built-in Monospace/Proportional fonts.
+    custom_font_loaded: Option<String>,
 }
 
 impl DashboardApp {
@@ -24,6 +29,49 @@ impl DashboardApp {
             config,
             shared,
             saved_notice: None,
+            custom_font_loaded: None,
+        }
+    }
+
+    /// Mirrors `OverlayApp::apply_custom_font`: loads `config.font_file`
+    /// into this window's own egui context (each window/viewport has its
+    /// own `Context`, so this doesn't affect the overlay or vice versa),
+    /// so the live preview renders in the actual selected font.
+    fn apply_custom_font(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.config.font_file.clone() else {
+            if self.custom_font_loaded.is_some() {
+                // A custom font was cleared - restore egui's defaults.
+                ctx.set_fonts(egui::FontDefinitions::default());
+                self.custom_font_loaded = None;
+            }
+            return;
+        };
+        if self.custom_font_loaded.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts
+                    .font_data
+                    .insert("custom".to_owned(), egui::FontData::from_owned(bytes).into());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "custom".to_owned());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Monospace)
+                    .or_default()
+                    .insert(0, "custom".to_owned());
+                ctx.set_fonts(fonts);
+                self.custom_font_loaded = Some(path);
+            }
+            Err(e) => {
+                eprintln!("hpwarn: could not load font_file {path}: {e}");
+                self.custom_font_loaded = Some(path); // don't retry every frame
+            }
         }
     }
 
@@ -123,15 +171,20 @@ impl DashboardApp {
         ui.add_space(12.0);
         ui.separator();
         ui.label(format!(
-            "Preview, in your chosen font/colour/size (threshold {}%):",
+            "Live preview, in your chosen font/colour/size (threshold {}%):",
             self.config.threshold
         ));
         let family = match self.config.font_style {
             FontStyle::Monospace => egui::FontFamily::Monospace,
             FontStyle::Proportional => egui::FontFamily::Proportional,
         };
+        let live_pct = *self.shared.pct.lock().unwrap();
+        let preview_text = match live_pct {
+            Some(p) => format!("HITPOINTS: {p}%"),
+            None => "HITPOINTS: --%".to_string(),
+        };
         ui.label(
-            egui::RichText::new("HITPOINTS: 42%")
+            egui::RichText::new(preview_text)
                 .font(egui::FontId::new(self.config.font_size.min(64.0), family))
                 .color(self.config.color32()),
         );
@@ -168,6 +221,12 @@ impl DashboardApp {
             .show_axes([false, true])
             .allow_scroll(false)
             .show(ui, |plot_ui| {
+                // Fat reference lines at 0/50/100% so they're easy to spot
+                // at a glance against the thinner HP curve.
+                let gridline_color = egui::Color32::from_gray(110);
+                for y in [0.0, 50.0, 100.0] {
+                    plot_ui.hline(HLine::new(y).width(2.5_f32).color(gridline_color));
+                }
                 if !points.is_empty() {
                     plot_ui.line(Line::new(PlotPoints::from(points)).name("HP %"));
                 }
@@ -208,6 +267,8 @@ impl eframe::App for DashboardApp {
         // Repaint regularly even with no user input, since HP/history/curve
         // change from the background watcher thread, not from UI events.
         ctx.request_repaint_after(Duration::from_millis(200));
+
+        self.apply_custom_font(ctx);
 
         egui::SidePanel::left("config_panel")
             .resizable(true)
