@@ -81,6 +81,10 @@ WASAPI via `cpal`, no ALSA-equivalent install step):
 3. The binary is `target\release\hpwarn.exe`. Run it directly, or copy it
    wherever you like and add that folder to your `PATH`.
 
+I'm not sure that this really works since I don't have any Windows installation
+at all, so this is completely untested. If you test it and find that it is
+or isn't working, please give me a shout :D
+
 The parts of hpwarn that are Linux/Wayland-specific (the native layer-shell
 overlay in `src/wayland_overlay.rs`, and the `install-icon.sh` /
 `.desktop`-file setup below) are conditionally compiled out on Windows -
