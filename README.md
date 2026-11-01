@@ -9,20 +9,43 @@ A tiny, single-purpose SWTOR overlay. It does exactly one thing:
 
 It reads your SWTOR combat log file directly (the same file DPS meters like
 [Baras](https://github.com/baras-app/baras) use), so no in-game addon or
-memory access is needed. It's a native Linux binary (Rust + egui), no
-Wine/Proton tricks required for the overlay itself.
+memory access is needed. It's a native binary (Rust + egui) for Linux or
+Windows, no Wine/Proton tricks required for the overlay itself.
 
 ## How it finds your HP
 
 Every combat log line carries the acting/target entity's current and max HP
 as `(cur/max)`. hpwarn identifies *you* using the same trick every SWTOR log
-parser uses: the `AreaEntered` and `DisciplineChanged` events are only ever
-logged for the local player, so whoever appears on those lines is "you".
-From then on it watches every line for your HP and ignores everyone else
-(including your own companion, whose entity tag is `YourTag/CompanionName`,
-never mistaken for your own `YourTag`).
+parser uses: the `AreaEntered` event is only ever logged for the local
+player, so whoever appears on that line is "you". From then on it watches
+every line for your HP and ignores everyone else (including your own
+companion, whose entity tag is `YourTag/CompanionName`, never mistaken for
+your own `YourTag`).
+
+### Teleports, taxis and ship transfers don't trigger false alarms
+
+Moving between zones (your ship, the fleet, a taxi, a flashpoint...) is a
+level-squash boundary: your effective max HP can jump to a completely
+different value, and the very `AreaEntered` line that marks the transition
+frequently reports a transient "1 HP" placeholder for a brief instant before
+your real HP syncs in a few lines later. Taken at face value, that's a huge,
+instantaneous HP swing that looks exactly like near-death - hpwarn
+recognises every `AreaEntered` line as a zone transition and treats it as a
+silent baseline reset instead: no beep, no overlay flash, and no bogus entry
+in the history/curve for the jump. Normal combat deaths and revives (a real
+0 HP -> full HP jump, for instance) aren't affected, since those aren't
+`AreaEntered` events.
+
+### History clears on a new combat log
+
+SWTOR starts a fresh `combat_*.txt` file on relog, after a crash, or simply
+each new session. hpwarn treats that as a new session and clears the
+dashboard's HP history and curve at that point, rather than carrying the
+previous session's data into the new one.
 
 ## Building
+
+### Linux
 
 Requires a Rust toolchain (`rustup.rs`) and ALSA dev headers for audio:
 
@@ -42,7 +65,44 @@ The binary is `target/release/hpwarn`. Copy it anywhere on your `$PATH`, e.g.:
 install -Dm755 target/release/hpwarn ~/.local/bin/hpwarn
 ```
 
-### Giving it a proper icon
+### Windows
+
+Works the same way, and needs no extra system packages (audio goes through
+WASAPI via `cpal`, no ALSA-equivalent install step):
+
+1. Install Rust from [rustup.rs](https://rustup.rs) (the MSVC toolchain is
+   the default and the easiest route - it'll offer to install the small
+   "C++ build tools" component from Visual Studio if you don't already have
+   it, which Rust needs on Windows regardless of this project).
+2. From the project folder:
+   ```powershell
+   cargo build --release
+   ```
+3. The binary is `target\release\hpwarn.exe`. Run it directly, or copy it
+   wherever you like and add that folder to your `PATH`.
+
+The parts of hpwarn that are Linux/Wayland-specific (the native layer-shell
+overlay in `src/wayland_overlay.rs`, and the `install-icon.sh` /
+`.desktop`-file setup below) are conditionally compiled out on Windows -
+they don't build there, and don't need to. That's fine: the Wayland path
+only exists to route around a Linux-compositor quirk where "always on top"
+can get silently dropped above a fullscreen-looking window; Windows' native
+always-on-top (which the ordinary overlay window already uses) doesn't have
+that problem, so the plain overlay window is all hpwarn uses there, and it
+should just work. The window icon likewise doesn't need the `.desktop`-file
+workaround on Windows - `WM_SETICON` (which hpwarn's embedded icon goes
+through) is honoured directly by the taskbar and alt-tab switcher.
+
+One thing I haven't been able to verify myself: I don't have a Windows
+machine or a working Rust-for-Windows cross-compiler available in the
+environment I built this in, so while the above should build cleanly (the
+Windows-only code paths are small and use well-trodden, cross-platform
+crates - `eframe`/`winit` for the window, `cpal`/`rodio` for audio), I
+haven't actually run a build or the resulting app on Windows. If
+`cargo build --release` hits anything unexpected there, let me know what it
+says and I'll fix it.
+
+### Giving it a proper icon (Linux)
 
 Without this step, your taskbar/launcher/alt-tab will likely show a generic
 fallback icon instead of hpwarn's own. hpwarn's windows do carry an
@@ -84,13 +144,15 @@ This opens a small settings window where you set:
   starts a fresh log (e.g. on relogging), so you never have to re-point it.
   A common Proton path looks like:
   `~/.local/share/Steam/steamapps/compatdata/1286830/pfx/drive_c/users/steamuser/Documents/Star Wars - The Old Republic/CombatLogs`
-  hpwarn guesses this automatically if it exists, but check it's right.
+  hpwarn guesses this automatically if it exists, but check it's right. On
+  native Windows, that's simply your `Documents\Star Wars - The Old
+  Republic\CombatLogs` folder, which hpwarn also guesses automatically.
 - **Threshold** — show/beep at or below this HP%.
 - **Font** — Monospace/Proportional, or point `font_file` at any `.ttf`/`.otf`
   for a fully custom font.
 - **Font size** and **colour**.
-- **Position** — on X11, also settable just by dragging the overlay around
-  once it's running (saved automatically on release). On Wayland's
+- **Position** — on X11 and on Windows, also settable just by dragging the
+  overlay around once it's running (saved automatically on release). On Wayland's
   layer-shell overlay, dragging isn't available, so set `pos_x`/`pos_y` here
   instead.
 

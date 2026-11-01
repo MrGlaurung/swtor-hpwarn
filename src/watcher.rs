@@ -78,6 +78,10 @@ pub fn run(shared: Arc<SharedState>) {
             leftover.clear();
             current_file = Some(target.clone());
             shared.set_status(format!("following {}", target.display()));
+            // SWTOR starts a fresh combat_*.txt on relog/crash-recovery/new
+            // session; treat that as a new game session and clear last
+            // session's HP history/curve rather than carrying it over.
+            shared.clear_history();
             replay_catchup(
                 &target,
                 &mut parser,
@@ -215,6 +219,23 @@ fn feed_bytes(
             if sample.max == 0 {
                 continue;
             }
+
+            if sample.zone_transition {
+                // A teleport/taxi/ship-transfer just happened: the HP on
+                // this line is a known-unreliable sync artifact (often a
+                // transient "1 HP" placeholder, and max HP can jump from
+                // the level-squash rescaling between zones), so it's not a
+                // real combat event. Don't beep on it, don't log it to
+                // history, and don't let the crossing comparison carry
+                // over - reset the baseline so the *next* real reading
+                // (which lands within milliseconds, once the zone's real
+                // HP syncs in) starts clean instead of being compared
+                // against stale pre-transition state.
+                *last_cur = None;
+                *prev_above = None;
+                continue;
+            }
+
             let pct = ((sample.cur as f64 / sample.max as f64) * 100.0)
                 .round()
                 .clamp(0.0, 100.0) as u8;
@@ -310,5 +331,63 @@ mod tests {
         // Single/zero-digit millisecond fields still produce 2-digit centis.
         assert_eq!(format_timestamp("00:00:00.005"), format!("{today} 00:00:00.00"));
         assert_eq!(format_timestamp("09:08:07.090"), format!("{today} 09:08:07.09"));
+    }
+
+    /// Regression test: a teleport/ship-transfer (an `AreaEntered` line)
+    /// must not produce a false "massive HP change" history entry, even
+    /// though the real post-transition HP can be wildly different from
+    /// the last reading before the transition (level-squash rescaling).
+    #[test]
+    fn zone_transition_does_not_pollute_history() {
+        let shared = Arc::new(SharedState::new(50, String::new()));
+        let mut parser = LogParser::new();
+        let mut prev_above = None;
+        let mut last_cur = None;
+        let mut leftover = String::new();
+
+        // 1) Establish self (an AreaEntered line - itself a zone_transition
+        // sample, so it should be skipped for display/history purposes too).
+        let establish_self = "[20:20:08.374] [@Rach'ka#687136982611430|(31.73,13.92,9.02,-147.61)|(1/379515)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>\n";
+
+        // 2) First real reading: baseline only, no history entry yet.
+        let first_real = "[20:55:56.628] [@Rach'ka#687136982611430|(-640.01,360.65,27.97,160.91)|(441133/441133)] [Annihilation Droid XRR-3 {1779997656219648}:15855000027709|(-640.00,358.00,27.97,0.00)|(11857644/11869049)] [Maul {808269895434240}] [ApplyEffect {836045448945477}: Damage {836045448945501}] (10917 energy {836045448940874}) <32751.0>\n";
+
+        // 3) A real incoming hit: this SHOULD produce exactly one history
+        // entry (legitimate combat damage, not a zone transition).
+        let real_hit = "[20:56:06.037] [Annihilation Droid XRR-3 {1779997656219648}:15855000027709|(-640.00,358.00,27.97,0.00)|(10672188/11869049)] [@Rach'ka#687136982611430|(-641.97,364.21,27.97,-17.61)|(433507/441133)] [Burning {2017371908735236}] [ApplyEffect {836045448945477}: Damage {836045448945501}] (6503 kinetic {836045448940873}) <6503.0>\n";
+
+        // 4) Ship transfer: AreaEntered with the classic "1 HP" placeholder
+        // and a completely different (level-squashed) max HP.
+        let area_entered = "[22:12:47.926] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(1/410680)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>\n";
+
+        // 5) The real post-transition HP syncs in, wildly different from
+        // reading 3 (433507/441133) - this must NOT be logged as a
+        // 433507->410680 "hp change" history entry.
+        let synced_hp = "[22:12:48.063] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(410680/441133)] [=] [Mark of Power {4503122886000640}] [ApplyEffect {836045448945477}: Unnatural Might {4503122886000920}]\n";
+
+        let all = format!("{establish_self}{first_real}{real_hit}{area_entered}{synced_hp}");
+        feed_bytes(
+            all.as_bytes(),
+            &mut leftover,
+            &mut parser,
+            &shared,
+            &mut prev_above,
+            &mut last_cur,
+            true,
+        );
+
+        let history = shared.history.lock().unwrap();
+        assert_eq!(
+            history.len(),
+            1,
+            "expected exactly one history entry (the real hit), got: {:?}",
+            *history
+        );
+        assert_eq!(history[0].cur, 433507);
+        assert_eq!(history[0].delta, 433507 - 441133);
+
+        // The zone transition reset the baseline, so after it, last_cur is
+        // the synced HP, ready to track real deltas again from here on.
+        assert_eq!(last_cur, Some(410680));
     }
 }

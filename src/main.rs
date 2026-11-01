@@ -6,6 +6,14 @@ mod overlay;
 mod parser;
 mod state;
 mod watcher;
+// The native Wayland layer-shell overlay only exists to route around a
+// Linux-compositor-specific problem (see overlay.rs/README): compositors
+// routinely stop compositing above any window that *looks* fullscreen, so a
+// normal "always on top" window can vanish behind the game. Windows (and
+// macOS) don't have that problem - a plain always-on-top window just stays
+// on top - so this module, and the Wayland-protocol crates it needs, only
+// need to exist (and only need to compile) on Linux.
+#[cfg(target_os = "linux")]
 mod wayland_overlay;
 
 use clap::Parser;
@@ -34,11 +42,17 @@ fn app_icon() -> Option<Arc<egui::IconData>> {
     }
 }
 
+/// hpwarn's own version, read from Cargo.toml at build time. Shown in the
+/// dashboard/settings window titles and bodies, and via `hpwarn --version`,
+/// so it's easy to tell at a glance whether you're running the build you
+/// think you are.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// hpwarn: shows your SWTOR HP% when it drops at/below a threshold, beeps
 /// once each time you cross from above it to at-or-below it, and keeps a
 /// dashboard with your HP history and curve.
 #[derive(Parser, Debug)]
-#[command(name = "hpwarn")]
+#[command(name = "hpwarn", version)]
 struct Args {
     /// Open only the lightweight settings window (no overlay, no history
     /// dashboard, no log watcher running). Mainly for editing the config
@@ -85,30 +99,39 @@ fn main() -> anyhow::Result<()> {
     // The overlay runs on its own background thread so the dashboard (if
     // shown) can own the main thread. On Wayland this is a plain Wayland
     // client with no GUI toolkit event loop of its own, so it's always
-    // thread-safe to run this way. On X11 it's a second eframe/winit
+    // thread-safe to run this way. On X11/Windows it's a second eframe/winit
     // window; winit's "must run on the main thread" restriction is a macOS
-    // requirement, not an X11 one, so a background thread works fine here.
+    // requirement, not an X11 or Windows one, so a background thread works
+    // fine here.
     {
         let shared = shared.clone();
         let config_path = config_path.clone();
         let config = config.clone();
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let no_layer_shell = args.no_layer_shell;
         std::thread::spawn(move || {
-            let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-            if is_wayland && !no_layer_shell {
-                match wayland_overlay::run(shared.clone(), config_path.clone(), config.clone()) {
-                    Ok(()) => return,
-                    Err(e) => {
-                        eprintln!(
-                            "hpwarn: native Wayland overlay unavailable ({e}); \
-                             falling back to a plain window (it may not stay above a fullscreen game)."
-                        );
-                        // Fall through to the eframe path below, reusing the
-                        // same watcher thread / shared state rather than
-                        // starting a second one.
+            #[cfg(target_os = "linux")]
+            {
+                let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+                if is_wayland && !no_layer_shell {
+                    match wayland_overlay::run(shared.clone(), config_path.clone(), config.clone()) {
+                        Ok(()) => return,
+                        Err(e) => {
+                            eprintln!(
+                                "hpwarn: native Wayland overlay unavailable ({e}); \
+                                 falling back to a plain window (it may not stay above a fullscreen game)."
+                            );
+                            // Fall through to the eframe path below, reusing
+                            // the same watcher thread / shared state rather
+                            // than starting a second one.
+                        }
                     }
                 }
             }
+            // On Windows (and as the Linux fallback above), a plain
+            // always-on-top eframe window is all that's needed - Windows
+            // doesn't have the fullscreen-unredirect problem Wayland
+            // compositors have, so this works reliably as-is.
             if let Err(e) = run_overlay(shared, config_path, config) {
                 eprintln!("hpwarn: overlay window failed: {e}");
             }
@@ -130,7 +153,7 @@ fn main() -> anyhow::Result<()> {
 fn run_configure(config_path: PathBuf) -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([520.0, 480.0])
-        .with_title("hpwarn settings")
+        .with_title(format!("hpwarn settings - v{VERSION}"))
         // Its own app_id, distinct from "hpwarn" (the overlay) and
         // "hpwarn-dashboard" (see run_dashboard for why this matters).
         .with_app_id("hpwarn-settings")
@@ -154,7 +177,7 @@ fn run_configure(config_path: PathBuf) -> eframe::Result<()> {
 fn run_dashboard(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([900.0, 600.0])
-        .with_title("hpwarn dashboard")
+        .with_title(format!("hpwarn dashboard - v{VERSION}"))
         // Give this window its own app_id (Wayland) / window class,
         // distinct from the overlay's "hpwarn". The overlay used to be
         // a plain window kept on top via a desktop-environment window

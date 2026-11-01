@@ -99,4 +99,11 @@ impl SharedState {
             c.pop_front();
         }
     }
+
+    /// Empties the HP-change history and curve, e.g. when the game starts a
+    /// new combat log file (relog, crash recovery, a new session).
+    pub fn clear_history(&self) {
+        self.history.lock().unwrap().clear();
+        self.curve.lock().unwrap().clear();
+    }
 }

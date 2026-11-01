@@ -126,6 +126,10 @@ impl eframe::App for ConfigureApp {
                     .font(egui::FontId::new(self.config.font_size.min(64.0), family))
                     .color(self.config.color32()),
             );
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.weak(format!("hpwarn v{}", crate::VERSION));
         });
     }
 }

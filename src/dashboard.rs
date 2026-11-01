@@ -198,6 +198,9 @@ impl DashboardApp {
             Some(p) => ui.label(format!("Current HP: {p}%")),
             None => ui.label("Current HP: unknown yet"),
         };
+
+        ui.add_space(12.0);
+        ui.weak(format!("hpwarn v{}", crate::VERSION));
     }
 
     fn history_panel(&self, ui: &mut egui::Ui) {

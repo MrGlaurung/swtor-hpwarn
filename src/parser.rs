@@ -12,6 +12,16 @@ pub struct HpSample {
     /// SWTOR's combat log doesn't carry a date on each line, only the
     /// filename does, so pairing this with a date is the caller's job.
     pub time: String,
+    /// True when this reading comes from an `AreaEntered` line - i.e. you
+    /// just zoned (a teleport/taxi, a ship transfer, a loading screen...).
+    /// SWTOR's combat log is unreliable right at this moment: the cur/max
+    /// HP on the `AreaEntered` line itself is very often a transient "1 HP"
+    /// placeholder (observed on 5 of 7 real zone transitions), and even
+    /// when it's not, max HP can jump wildly from the level-squash
+    /// stat rescaling between zones - neither reflects real combat
+    /// danger, so callers should treat it as a baseline reset, not a
+    /// genuine HP change worth beeping over or logging to history.
+    pub zone_transition: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +87,8 @@ impl LogParser {
         // "who am I" flip to a random teammate every time the group synced,
         // which is far worse than just being slow to detect yourself, so it
         // must not be used here even as a fallback.
-        if event_field.starts_with("AreaEntered") {
+        let zone_transition = event_field.starts_with("AreaEntered");
+        if zone_transition {
             if let Some((name, _, _)) = self.parse_entity(source) {
                 self.self_tag = Some(name);
             }
@@ -136,7 +147,7 @@ impl LogParser {
             });
         }
 
-        Some(HpSample { cur, max, change, time })
+        Some(HpSample { cur, max, change, time, zone_transition })
     }
 
     /// Parses an entity field into (full_name_tag, current_hp, max_hp).
@@ -191,6 +202,7 @@ mod tests {
         let l1 = "[20:20:08.374] [@Rach'ka#687136982611430|(31.73,13.92,9.02,-147.61)|(1/379515)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>";
         let s1 = p.process_line(l1).unwrap();
         assert_eq!((s1.cur, s1.max), (1, 379515));
+        assert!(s1.zone_transition);
         assert_eq!(p.self_tag(), Some("@Rach'ka#687136982611430"));
 
         // Self dealing damage to a droid: own HP shown, but no "change"
@@ -199,6 +211,7 @@ mod tests {
         let s2 = p.process_line(l2).unwrap();
         assert_eq!((s2.cur, s2.max), (441133, 441133));
         assert_eq!(s2.change, None);
+        assert!(!s2.zone_transition);
 
         // Heal from companion: self is the target, companion is the source.
         let l3 = "[20:22:04.358] [@Rach'ka#687136982611430/Shae Vizla {3916370223824896}:14362007191892|(4724.03,6732.19,1.95,125.70)|(293136/293136)] [@Rach'ka#687136982611430|(4722.40,6733.35,2.02,-144.30)|(390012/401385)] [Kolto Drip {3569495780098048}] [ApplyEffect {836045448945477}: Heal {836045448945500}] (10496) <2099.0>";
@@ -229,6 +242,46 @@ mod tests {
         // Someone else entirely should not be mistaken for self.
         let l4 = "[20:46:07.872] [@Elfr\u{fffd}ede#690180220101113|(1376.30,-4635.30,-766.66,5.32)|(382117/395915)] [=] [Mark of Power {4503122886000640}] [ApplyEffect {836045448945477}: Unnatural Might {4503122886000920}]";
         assert_eq!(p.process_line(l4), None);
+    }
+
+    /// Regression test for a real false-alarm source: taxiing/teleporting
+    /// (to your ship, the fleet, a taxi...) crosses a level-squash zone
+    /// boundary, which can make max HP (and sometimes cur HP, via a
+    /// transient "1 HP" placeholder) jump wildly between the line just
+    /// before the zone change and the `AreaEntered` line. None of that is a
+    /// real combat event, so every `AreaEntered` reading must be flagged
+    /// `zone_transition` regardless of what its cur/max actually say -
+    /// callers use that flag to suppress the beep and the history entry
+    /// that a naive before/after HP comparison would otherwise produce.
+    #[test]
+    fn area_entered_is_always_flagged_as_a_zone_transition() {
+        let mut p = LogParser::new();
+        let establish_self = "[20:20:08.374] [@Rach'ka#687136982611430|(31.73,13.92,9.02,-147.61)|(1/379515)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>";
+        p.process_line(establish_self);
+
+        // Real sequence: the player activates a ship-transfer ability while
+        // at full HP in one zone (441133/441133 max), then a loading screen
+        // later lands them on their ship in a different, level-squashed
+        // zone where max HP is a completely different value (410680) and
+        // the combat log briefly reports cur HP as the literal placeholder
+        // "1" before the real value syncs a few lines later.
+        let before_transfer = "[22:12:39.272] [@Rach'ka#687136982611430|(1195.74,-4427.85,-777.18,-75.97)|(441133/441133)] [=] [Priority Transport: Personal Starship {3215556115169280}] [Event {836045448945472}: AbilityActivate {836045448945479}]";
+        let s0 = p.process_line(before_transfer).unwrap();
+        assert_eq!((s0.cur, s0.max), (441133, 441133));
+        assert!(!s0.zone_transition);
+
+        let area_entered = "[22:12:47.926] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(1/410680)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>";
+        let s = p.process_line(area_entered).unwrap();
+        assert_eq!((s.cur, s.max), (1, 410680));
+        assert!(s.zone_transition);
+
+        // The real HP syncs in a few lines later, on an ordinary buff
+        // line - not an AreaEntered line, so it must NOT be flagged, even
+        // though it's a huge jump from the "1" reading just before it.
+        let synced_hp = "[22:12:48.063] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(410680/441133)] [=] [Mark of Power {4503122886000640}] [ApplyEffect {836045448945477}: Unnatural Might {4503122886000920}]";
+        let s2 = p.process_line(synced_hp).unwrap();
+        assert_eq!((s2.cur, s2.max), (410680, 441133));
+        assert!(!s2.zone_transition);
     }
 
     /// Regression test for a real bug: `DisciplineChanged` is NOT a
