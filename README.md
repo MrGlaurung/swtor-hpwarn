@@ -26,15 +26,19 @@ your own `YourTag`).
 
 Moving between zones (your ship, the fleet, a taxi, a flashpoint...) is a
 level-squash boundary: your effective max HP can jump to a completely
-different value, and the very `AreaEntered` line that marks the transition
-frequently reports a transient "1 HP" placeholder for a brief instant before
-your real HP syncs in a few lines later. Taken at face value, that's a huge,
-instantaneous HP swing that looks exactly like near-death - hpwarn
-recognises every `AreaEntered` line as a zone transition and treats it as a
-silent baseline reset instead: no beep, no overlay flash, and no bogus entry
-in the history/curve for the jump. Normal combat deaths and revives (a real
-0 HP -> full HP jump, for instance) aren't affected, since those aren't
-`AreaEntered` events.
+different value, and the `AreaEntered` line that marks the transition - plus
+several buff/stim/immunity lines logged right after it - frequently report a
+transient "1 HP" placeholder before your real HP syncs in a beat later.
+Taken at face value, that's a huge, instantaneous HP swing that looks
+exactly like near-death. hpwarn treats the whole burst as a silent baseline
+reset: it recognises `AreaEntered` as the start of a transition, keeps
+ignoring the lingering "1 HP" placeholder lines that follow it, and only
+resumes normal tracking once a real (non-placeholder) reading shows up -
+that reading becomes the new baseline, not a delta from "1". Net effect: no
+beep, no overlay flash, and no bogus jump in the history/curve, either for
+the drop to the placeholder or the jump back to your real HP. Normal combat
+deaths and revives (a real 0 HP -> full HP jump, for instance) aren't
+affected, since those aren't zone transitions.
 
 ### History clears on a new combat log
 

@@ -15,6 +15,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 // 20x/second would itself be enough I/O to delay reading the live file's
 // new bytes - the one thing that actually needs to be fast.
 const DIR_RESCAN_INTERVAL: Duration = Duration::from_secs(2);
+// Safety cap on how long we'll keep suppressing "cur HP == 1" readings as a
+// continuation of a zone-transition placeholder (see `feed_bytes`) before
+// giving up and treating the next reading as real regardless. In practice
+// the real placeholder clears in well under a second; this is just a
+// backstop so hpwarn can't go silent indefinitely if something unexpected
+// happens (e.g. a future game update changes this behaviour).
+const ZONE_TRANSITION_GRACE: Duration = Duration::from_secs(5);
 
 /// Runs forever on a background thread: resolves the configured log path to
 /// an actual file, tails it for new lines, parses your HP out of them, and
@@ -28,6 +35,10 @@ pub fn run(shared: Arc<SharedState>) {
     let mut parser = LogParser::new();
     let mut prev_above: Option<bool> = None;
     let mut last_cur: Option<u64> = None;
+    // Some(started_at) while we're still inside a zone-transition's
+    // placeholder window (see `feed_bytes`); None once a real post-transition
+    // reading has been seen.
+    let mut zone_grace: Option<Instant> = None;
     let mut last_dir_scan = Instant::now() - DIR_RESCAN_INTERVAL; // force a scan on the first tick
     let mut last_configured = String::new();
 
@@ -74,6 +85,7 @@ pub fn run(shared: Arc<SharedState>) {
             parser = LogParser::new();
             prev_above = None;
             last_cur = None;
+            zone_grace = None;
             pos = 0;
             leftover.clear();
             current_file = Some(target.clone());
@@ -90,6 +102,7 @@ pub fn run(shared: Arc<SharedState>) {
                 &shared,
                 &mut prev_above,
                 &mut last_cur,
+                &mut zone_grace,
             );
             continue;
         }
@@ -128,6 +141,7 @@ pub fn run(shared: Arc<SharedState>) {
             &shared,
             &mut prev_above,
             &mut last_cur,
+            &mut zone_grace,
             true,
         );
     }
@@ -178,6 +192,7 @@ fn replay_catchup(
     shared: &Arc<SharedState>,
     prev_above: &mut Option<bool>,
     last_cur: &mut Option<u64>,
+    zone_grace: &mut Option<Instant>,
 ) {
     let Ok(mut file) = File::open(path) else { return };
     let mut buf = Vec::new();
@@ -188,7 +203,7 @@ fn replay_catchup(
     // beep disabled during catch-up: we only want to learn current state.
     // History/curve are still recorded, so the dashboard has immediate
     // context on startup instead of coming up empty.
-    feed_bytes(&buf, leftover, parser, shared, prev_above, last_cur, false);
+    feed_bytes(&buf, leftover, parser, shared, prev_above, last_cur, zone_grace, false);
 }
 
 fn feed_bytes(
@@ -198,6 +213,7 @@ fn feed_bytes(
     shared: &Arc<SharedState>,
     prev_above: &mut Option<bool>,
     last_cur: &mut Option<u64>,
+    zone_grace: &mut Option<Instant>,
     beep_enabled: bool,
 ) {
     let text = String::from_utf8_lossy(buf);
@@ -228,12 +244,30 @@ fn feed_bytes(
                 // real combat event. Don't beep on it, don't log it to
                 // history, and don't let the crossing comparison carry
                 // over - reset the baseline so the *next* real reading
-                // (which lands within milliseconds, once the zone's real
-                // HP syncs in) starts clean instead of being compared
-                // against stale pre-transition state.
+                // starts clean instead of being compared against stale
+                // pre-transition state. Start the grace window below too:
+                // the placeholder doesn't always clear on this exact line -
+                // see below.
                 *last_cur = None;
                 *prev_above = None;
+                *zone_grace = Some(Instant::now());
                 continue;
+            }
+
+            if let Some(started) = *zone_grace {
+                // SWTOR keeps echoing the "1 HP" placeholder on several
+                // more lines after the AreaEntered line itself (observed:
+                // buff/stim/immunity lines logged in the same burst, all
+                // still carrying cur=1) before the real post-transition HP
+                // syncs in a beat later. Treating that first *real* value as
+                // a fresh baseline - rather than a delta from the "1" - is
+                // exactly what already happens below as long as we keep
+                // skipping every lingering "1" and keep last_cur at None
+                // until then.
+                if sample.cur == 1 && started.elapsed() < ZONE_TRANSITION_GRACE {
+                    continue;
+                }
+                *zone_grace = None;
             }
 
             let pct = ((sample.cur as f64 / sample.max as f64) * 100.0)
@@ -343,6 +377,7 @@ mod tests {
         let mut parser = LogParser::new();
         let mut prev_above = None;
         let mut last_cur = None;
+        let mut zone_grace = None;
         let mut leftover = String::new();
 
         // 1) Establish self (an AreaEntered line - itself a zone_transition
@@ -360,12 +395,22 @@ mod tests {
         // and a completely different (level-squashed) max HP.
         let area_entered = "[22:12:47.926] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(1/410680)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>\n";
 
+        // 4b) The real log keeps echoing the "1 HP" placeholder across
+        // several more buff/stim/immunity lines before the real value
+        // syncs in - these must ALSO be ignored (not treated as a fresh
+        // baseline on their own), otherwise the baseline gets seeded at
+        // "1" and the real sync line two steps below produces a bogus
+        // "+410679 hp" entry, which was the actual bug being fixed here.
+        let lingering_placeholder = "[22:12:47.968] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(1/410680)] [=] [ {2835571768557568}] [ApplyEffect {836045448945477}: Mental Exhaustion {2835571768557864}]\n";
+
         // 5) The real post-transition HP syncs in, wildly different from
         // reading 3 (433507/441133) - this must NOT be logged as a
-        // 433507->410680 "hp change" history entry.
+        // 433507->410680 (or 1->410680) "hp change" history entry.
         let synced_hp = "[22:12:48.063] [@Rach'ka#687136982611430|(-0.02,43.05,8.00,-45.80)|(410680/441133)] [=] [Mark of Power {4503122886000640}] [ApplyEffect {836045448945477}: Unnatural Might {4503122886000920}]\n";
 
-        let all = format!("{establish_self}{first_real}{real_hit}{area_entered}{synced_hp}");
+        let all = format!(
+            "{establish_self}{first_real}{real_hit}{area_entered}{lingering_placeholder}{synced_hp}"
+        );
         feed_bytes(
             all.as_bytes(),
             &mut leftover,
@@ -373,6 +418,7 @@ mod tests {
             &shared,
             &mut prev_above,
             &mut last_cur,
+            &mut zone_grace,
             true,
         );
 
