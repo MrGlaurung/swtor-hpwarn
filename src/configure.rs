@@ -1,4 +1,4 @@
-use crate::config::{Config, FontStyle};
+use crate::config::{self, Config, FontStyle};
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -45,9 +45,41 @@ impl eframe::App for ConfigureApp {
                 let mut t = self.config.threshold as f32;
                 if ui.add(egui::Slider::new(&mut t, 1.0..=99.0).suffix("%")).changed() {
                     self.config.threshold = t.round() as u8;
+                    self.config.clamp_second_beep();
                     changed = true;
                 }
             });
+            ui.add_space(8.0);
+
+            let second_possible = config::second_beep_possible(self.config.threshold);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(second_possible, |ui| {
+                    if ui
+                        .checkbox(&mut self.config.second_beep_enabled, "Second \"panic\" beep at:")
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                if !second_possible {
+                    self.config.second_beep_enabled = false;
+                }
+                let max_second = config::max_second_threshold(self.config.threshold);
+                let mut t2 = self.config.second_threshold.min(max_second).max(1) as f32;
+                if ui
+                    .add_enabled(
+                        second_possible && self.config.second_beep_enabled,
+                        egui::Slider::new(&mut t2, 1.0..=max_second.max(1) as f32).suffix("%"),
+                    )
+                    .changed()
+                {
+                    self.config.second_threshold = t2.round() as u8;
+                    changed = true;
+                }
+            });
+            if !second_possible {
+                ui.weak("(not available - first threshold is already at its lowest, 1%)");
+            }
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {

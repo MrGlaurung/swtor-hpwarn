@@ -1,5 +1,6 @@
-use crate::config::{Config, FontStyle};
+use crate::config::{self, Config, FontStyle};
 use crate::state::SharedState;
+use crate::watcher::delete_other_combat_logs;
 use eframe::egui;
 use egui_plot::{HLine, Line, Plot, PlotPoints};
 use std::path::PathBuf;
@@ -76,15 +77,33 @@ impl DashboardApp {
     }
 
     fn save(&mut self) {
+        // Keep second_threshold/second_beep_enabled consistent with
+        // threshold before pushing/saving, in case threshold just changed.
+        self.config.clamp_second_beep();
+
         // Push into the shared state immediately so the overlay/watcher
         // don't have to wait out their own config-file hot-reload poll.
         self.shared.set_threshold(self.config.threshold);
         self.shared.set_log_path(self.config.log_path.clone());
+        self.shared.set_second_beep_enabled(self.config.second_beep_enabled);
+        self.shared.set_second_threshold(self.config.second_threshold);
         if let Err(e) = self.config.save(&self.config_path) {
             eprintln!("hpwarn: failed to save config: {e}");
         } else {
             self.saved_notice = Some(Instant::now());
         }
+    }
+
+    /// Deletes every combat log in the configured log directory except the
+    /// one currently being followed, then immediately recomputes the count
+    /// shown next to the "Clean log" button (this is the other place,
+    /// besides new-file detection in the watcher, where that count changes).
+    fn clean_log(&mut self) {
+        let Some(current) = self.shared.current_log_file() else {
+            return;
+        };
+        delete_other_combat_logs(&self.config.log_path, &current);
+        self.shared.set_old_log_count(0);
     }
 
     fn config_panel(&mut self, ui: &mut egui::Ui) {
@@ -102,9 +121,44 @@ impl DashboardApp {
             let mut t = self.config.threshold as f32;
             if ui.add(egui::Slider::new(&mut t, 1.0..=99.0).suffix("%")).changed() {
                 self.config.threshold = t.round() as u8;
+                self.config.clamp_second_beep();
                 changed = true;
             }
         });
+        ui.add_space(8.0);
+
+        // Optional second, lower-HP "panic" beep. Its slider's max is
+        // always first_threshold - 1, and it's impossible to enable at all
+        // once that max would be 0 (i.e. threshold == 1).
+        let second_possible = config::second_beep_possible(self.config.threshold);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(second_possible, |ui| {
+                if ui
+                    .checkbox(&mut self.config.second_beep_enabled, "Second \"panic\" beep at:")
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+            if !second_possible {
+                self.config.second_beep_enabled = false;
+            }
+            let max_second = config::max_second_threshold(self.config.threshold);
+            let mut t2 = self.config.second_threshold.min(max_second).max(1) as f32;
+            if ui
+                .add_enabled(
+                    second_possible && self.config.second_beep_enabled,
+                    egui::Slider::new(&mut t2, 1.0..=max_second.max(1) as f32).suffix("%"),
+                )
+                .changed()
+            {
+                self.config.second_threshold = t2.round() as u8;
+                changed = true;
+            }
+        });
+        if !second_possible {
+            ui.weak("(not available - first threshold is already at its lowest, 1%)");
+        }
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
@@ -167,6 +221,17 @@ impl DashboardApp {
         if changed {
             self.save();
         }
+
+        ui.add_space(12.0);
+        ui.separator();
+        let old_log_count = self.shared.old_log_count();
+        ui.horizontal(|ui| {
+            let can_clean = old_log_count > 0 && self.shared.current_log_file().is_some();
+            if ui.add_enabled(can_clean, egui::Button::new("Clean log")).clicked() {
+                self.clean_log();
+            }
+            ui.label(format!("This will delete {old_log_count} old log files"));
+        });
 
         ui.add_space(12.0);
         ui.separator();

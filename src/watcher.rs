@@ -1,4 +1,4 @@
-use crate::audio::play_boing;
+use crate::audio::{play_boing, play_boing_then_panic, play_panic};
 use crate::parser::LogParser;
 use crate::state::{HistoryEntry, SharedState};
 use std::fs::File;
@@ -34,6 +34,7 @@ pub fn run(shared: Arc<SharedState>) {
     let mut leftover = String::new();
     let mut parser = LogParser::new();
     let mut prev_above: Option<bool> = None;
+    let mut prev_above_second: Option<bool> = None;
     let mut last_cur: Option<u64> = None;
     // Some(started_at) while we're still inside a zone-transition's
     // placeholder window (see `feed_bytes`); None once a real post-transition
@@ -84,6 +85,7 @@ pub fn run(shared: Arc<SharedState>) {
             // what your current HP is before going live.
             parser = LogParser::new();
             prev_above = None;
+            prev_above_second = None;
             last_cur = None;
             zone_grace = None;
             pos = 0;
@@ -94,6 +96,12 @@ pub fn run(shared: Arc<SharedState>) {
             // session; treat that as a new game session and clear last
             // session's HP history/curve rather than carrying it over.
             shared.clear_history();
+            shared.set_current_log_file(Some(target.clone()));
+            // Recompute how many *other* combat logs are sitting in the
+            // directory now, so the dashboard's "Clean log" count is fresh.
+            // Deliberately only done here (on new-file detection), not on
+            // every tick, per instructions not to poll this while tracking.
+            shared.set_old_log_count(count_other_combat_logs(&configured, &target));
             replay_catchup(
                 &target,
                 &mut parser,
@@ -101,6 +109,7 @@ pub fn run(shared: Arc<SharedState>) {
                 &mut leftover,
                 &shared,
                 &mut prev_above,
+                &mut prev_above_second,
                 &mut last_cur,
                 &mut zone_grace,
             );
@@ -140,11 +149,21 @@ pub fn run(shared: Arc<SharedState>) {
             &mut parser,
             &shared,
             &mut prev_above,
+            &mut prev_above_second,
             &mut last_cur,
             &mut zone_grace,
             true,
         );
     }
+}
+
+/// Whether a filename looks like a SWTOR combat log, e.g.
+/// `combat_2026-11-04_12_54_55_790600.txt`. Shared between `resolve_target`
+/// (finding the newest one to follow) and the "Clean log" feature (finding
+/// every *other* one, to delete).
+fn is_combat_log_filename(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".txt") && lower.contains("combat")
 }
 
 /// Finds the file to tail: the path itself if it's a file, or the newest
@@ -162,12 +181,8 @@ fn resolve_target(configured: &str) -> Option<PathBuf> {
                 if !path.is_file() {
                     continue;
                 }
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if !name.ends_with(".txt") || !name.contains("combat") {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !is_combat_log_filename(name) {
                     continue;
                 }
                 if let Ok(meta) = entry.metadata() {
@@ -184,6 +199,59 @@ fn resolve_target(configured: &str) -> Option<PathBuf> {
     None
 }
 
+/// The directory to scan for "other" combat logs: `configured` itself if
+/// it's a folder, or its parent if it's a specific file.
+fn log_dir_for(configured: &str) -> Option<PathBuf> {
+    let p = Path::new(configured);
+    if p.is_dir() {
+        Some(p.to_path_buf())
+    } else {
+        p.parent().map(|d| d.to_path_buf())
+    }
+}
+
+/// Lists every `combat_*.txt` file in the configured log directory except
+/// `current`, the file currently being followed.
+fn other_combat_logs(configured: &str, current: &Path) -> Vec<PathBuf> {
+    let Some(dir) = log_dir_for(configured) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path == current {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if is_combat_log_filename(name) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// How many combat logs (other than `current`) are sitting in the
+/// configured log directory - the count shown next to the "Clean log"
+/// button. Deliberately cheap to call only occasionally (on new-file
+/// detection), not every tick.
+fn count_other_combat_logs(configured: &str, current: &Path) -> usize {
+    other_combat_logs(configured, current).len()
+}
+
+/// Deletes every combat log in the configured log directory except
+/// `current`. Returns how many files were actually removed.
+pub fn delete_other_combat_logs(configured: &str, current: &Path) -> usize {
+    let mut removed = 0;
+    for path in other_combat_logs(configured, current) {
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn replay_catchup(
     path: &Path,
     parser: &mut LogParser,
@@ -191,6 +259,7 @@ fn replay_catchup(
     leftover: &mut String,
     shared: &Arc<SharedState>,
     prev_above: &mut Option<bool>,
+    prev_above_second: &mut Option<bool>,
     last_cur: &mut Option<u64>,
     zone_grace: &mut Option<Instant>,
 ) {
@@ -203,7 +272,17 @@ fn replay_catchup(
     // beep disabled during catch-up: we only want to learn current state.
     // History/curve are still recorded, so the dashboard has immediate
     // context on startup instead of coming up empty.
-    feed_bytes(&buf, leftover, parser, shared, prev_above, last_cur, zone_grace, false);
+    feed_bytes(
+        &buf,
+        leftover,
+        parser,
+        shared,
+        prev_above,
+        prev_above_second,
+        last_cur,
+        zone_grace,
+        false,
+    );
 }
 
 fn feed_bytes(
@@ -212,6 +291,7 @@ fn feed_bytes(
     parser: &mut LogParser,
     shared: &Arc<SharedState>,
     prev_above: &mut Option<bool>,
+    prev_above_second: &mut Option<bool>,
     last_cur: &mut Option<u64>,
     zone_grace: &mut Option<Instant>,
     beep_enabled: bool,
@@ -250,6 +330,7 @@ fn feed_bytes(
                 // see below.
                 *last_cur = None;
                 *prev_above = None;
+                *prev_above_second = None;
                 *zone_grace = Some(Instant::now());
                 continue;
             }
@@ -304,14 +385,30 @@ fn feed_bytes(
 
             let threshold = shared.threshold();
             let above_now = pct > threshold;
+
+            // Second, optional "panic" beep at a lower HP%. Its threshold is
+            // only meaningful while enabled, and the dashboard already keeps
+            // it clamped below `threshold`, so no extra validation is
+            // needed here.
+            let second_enabled = shared.second_beep_enabled();
+            let second_threshold = shared.second_threshold();
+            let above_now_second = pct > second_threshold;
+
             if beep_enabled {
-                if let Some(was_above) = *prev_above {
-                    if was_above && !above_now {
-                        play_boing();
-                    }
+                let crosses_first = prev_above.unwrap_or(false) && !above_now;
+                let crosses_second = second_enabled
+                    && prev_above_second.unwrap_or(false)
+                    && !above_now_second;
+
+                match (crosses_first, crosses_second) {
+                    (true, true) => play_boing_then_panic(),
+                    (true, false) => play_boing(),
+                    (false, true) => play_panic(),
+                    (false, false) => {}
                 }
             }
             *prev_above = Some(above_now);
+            *prev_above_second = Some(above_now_second);
         }
     }
 
@@ -376,6 +473,7 @@ mod tests {
         let shared = Arc::new(SharedState::new(50, String::new()));
         let mut parser = LogParser::new();
         let mut prev_above = None;
+        let mut prev_above_second = None;
         let mut last_cur = None;
         let mut zone_grace = None;
         let mut leftover = String::new();
@@ -417,6 +515,7 @@ mod tests {
             &mut parser,
             &shared,
             &mut prev_above,
+            &mut prev_above_second,
             &mut last_cur,
             &mut zone_grace,
             true,
@@ -435,5 +534,86 @@ mod tests {
         // The zone transition reset the baseline, so after it, last_cur is
         // the synced HP, ready to track real deltas again from here on.
         assert_eq!(last_cur, Some(410680));
+    }
+
+    #[test]
+    fn recognizes_combat_log_filenames() {
+        assert!(is_combat_log_filename("combat_2026-11-04_12_54_55_790600.txt"));
+        assert!(is_combat_log_filename("COMBAT_2026-11-04_12_54_55_790600.TXT"));
+        assert!(!is_combat_log_filename("notes.txt"));
+        assert!(!is_combat_log_filename("combat_2026-11-04.log"));
+    }
+
+    /// "Clean log" must count/delete every other combat log in the
+    /// directory, but never the one currently being followed.
+    #[test]
+    fn other_combat_logs_excludes_current_file_and_non_matching_names() {
+        let dir = std::env::temp_dir().join(format!(
+            "hpwarn_test_other_logs_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let current = dir.join("combat_2026-11-04_12_54_55_790600.txt");
+        let old1 = dir.join("combat_2026-11-03_08_00_00_000000.txt");
+        let old2 = dir.join("combat_2026-11-02_08_00_00_000000.txt");
+        let unrelated = dir.join("readme.txt");
+        for f in [&current, &old1, &old2, &unrelated] {
+            std::fs::write(f, b"x").unwrap();
+        }
+
+        let configured = dir.to_string_lossy().to_string();
+        assert_eq!(count_other_combat_logs(&configured, &current), 2);
+
+        let removed = delete_other_combat_logs(&configured, &current);
+        assert_eq!(removed, 2);
+        assert!(current.exists(), "current log must never be deleted");
+        assert!(unrelated.exists(), "non-combat-log files must never be deleted");
+        assert!(!old1.exists());
+        assert!(!old2.exists());
+        assert_eq!(count_other_combat_logs(&configured, &current), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sequencing: when a single sample crosses both the first and second
+    /// thresholds downward at once, both beeps must fire (verified here via
+    /// the crossing booleans rather than actual audio playback, which isn't
+    /// observable in a unit test).
+    #[test]
+    fn single_drop_crossing_both_thresholds_triggers_both_crossings() {
+        let shared = Arc::new(SharedState::new(50, String::new()));
+        shared.set_second_beep_enabled(true);
+        shared.set_second_threshold(30);
+
+        let mut parser = LogParser::new();
+        let mut prev_above = None;
+        let mut prev_above_second = None;
+        let mut last_cur = None;
+        let mut zone_grace = None;
+        let mut leftover = String::new();
+
+        let establish_self = "[20:20:08.374] [@Rach'ka#687136982611430|(31.73,13.92,9.02,-147.61)|(1/100)] [] [] [AreaEntered {836045448953664}: Fury {137438956742}] (he4000) <v7.0.0b>\n";
+        let first_real = "[20:55:56.628] [@Rach'ka#687136982611430|(-640.01,360.65,27.97,160.91)|(60/100)] [Annihilation Droid XRR-3 {1779997656219648}:15855000027709|(-640.00,358.00,27.97,0.00)|(11857644/11869049)] [Maul {808269895434240}] [ApplyEffect {836045448945477}: Damage {836045448945501}] (10917 energy {836045448940874}) <32751.0>\n";
+        let big_hit = "[20:56:06.037] [Annihilation Droid XRR-3 {1779997656219648}:15855000027709|(-640.00,358.00,27.97,0.00)|(10672188/11869049)] [@Rach'ka#687136982611430|(-641.97,364.21,27.97,-17.61)|(20/100)] [Burning {2017371908735236}] [ApplyEffect {836045448945477}: Damage {836045448945501}] (40 kinetic {836045448940873}) <6503.0>\n";
+
+        let all = format!("{establish_self}{first_real}{big_hit}");
+        feed_bytes(
+            all.as_bytes(),
+            &mut leftover,
+            &mut parser,
+            &shared,
+            &mut prev_above,
+            &mut prev_above_second,
+            &mut last_cur,
+            &mut zone_grace,
+            true,
+        );
+
+        // 60% was above both 50% and 30%; the big hit to 20% drops below
+        // both in one sample, so both should now read "not above".
+        assert_eq!(prev_above, Some(false));
+        assert_eq!(prev_above_second, Some(false));
     }
 }

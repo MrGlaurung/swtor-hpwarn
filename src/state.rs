@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Max rows kept in the HP-change history (oldest dropped once full), per
@@ -46,6 +47,19 @@ pub struct SharedState {
     /// HP% curve points, oldest first, capped at `CURVE_CAP`. A new point is
     /// appended only when HP actually changes (not on a timer).
     pub curve: Mutex<VecDeque<u8>>,
+    /// Whether the optional, lower-HP "panic" beep is enabled.
+    pub second_beep_enabled: AtomicBool,
+    /// Threshold for the optional second beep. Only meaningful while
+    /// `second_beep_enabled` is true.
+    pub second_threshold: AtomicU8,
+    /// The combat log file currently being followed, if known. Used by the
+    /// "Clean log" feature to know which file NOT to delete.
+    pub current_log_file: Mutex<Option<PathBuf>>,
+    /// Count of other `combat_*.txt` files in the log directory (i.e. every
+    /// one except `current_log_file`), eligible for "Clean log" to delete.
+    /// Recomputed only when a new combat log file is detected (alongside
+    /// `clear_history`), not polled continuously while tracking HP.
+    pub old_log_count: AtomicUsize,
 }
 
 impl SharedState {
@@ -57,6 +71,10 @@ impl SharedState {
             status: Mutex::new("starting".to_string()),
             history: Mutex::new(VecDeque::with_capacity(HISTORY_CAP)),
             curve: Mutex::new(VecDeque::with_capacity(CURVE_CAP)),
+            second_beep_enabled: AtomicBool::new(false),
+            second_threshold: AtomicU8::new(1),
+            current_log_file: Mutex::new(None),
+            old_log_count: AtomicUsize::new(0),
         }
     }
 
@@ -66,6 +84,38 @@ impl SharedState {
 
     pub fn threshold(&self) -> u8 {
         self.threshold.load(Ordering::Relaxed)
+    }
+
+    pub fn set_second_beep_enabled(&self, v: bool) {
+        self.second_beep_enabled.store(v, Ordering::Relaxed);
+    }
+
+    pub fn second_beep_enabled(&self) -> bool {
+        self.second_beep_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_second_threshold(&self, v: u8) {
+        self.second_threshold.store(v, Ordering::Relaxed);
+    }
+
+    pub fn second_threshold(&self) -> u8 {
+        self.second_threshold.load(Ordering::Relaxed)
+    }
+
+    pub fn set_current_log_file(&self, path: Option<PathBuf>) {
+        *self.current_log_file.lock().unwrap() = path;
+    }
+
+    pub fn current_log_file(&self) -> Option<PathBuf> {
+        self.current_log_file.lock().unwrap().clone()
+    }
+
+    pub fn set_old_log_count(&self, n: usize) {
+        self.old_log_count.store(n, Ordering::Relaxed);
+    }
+
+    pub fn old_log_count(&self) -> usize {
+        self.old_log_count.load(Ordering::Relaxed)
     }
 
     pub fn set_log_path(&self, path: String) {

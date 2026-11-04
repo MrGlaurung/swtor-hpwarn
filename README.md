@@ -85,10 +85,6 @@ WASAPI via `cpal`, no ALSA-equivalent install step):
 3. The binary is `target\release\hpwarn.exe`. Run it directly, or copy it
    wherever you like and add that folder to your `PATH`.
 
-I'm not sure that this really works since I don't have any Windows installation
-at all, so this is completely untested. If you test it and find that it is
-or isn't working, please give me a shout :D
-
 The parts of hpwarn that are Linux/Wayland-specific (the native layer-shell
 overlay in `src/wayland_overlay.rs`, and the `install-icon.sh` /
 `.desktop`-file setup below) are conditionally compiled out on Windows -
@@ -156,6 +152,15 @@ This opens a small settings window where you set:
   native Windows, that's simply your `Documents\Star Wars - The Old
   Republic\CombatLogs` folder, which hpwarn also guesses automatically.
 - **Threshold** — show/beep at or below this HP%.
+- **Second "panic" beep** (optional) — an extra, sharper warning sound at a
+  *lower* HP% than the first beep, for when things are getting really
+  dangerous. Its slider always caps out at `threshold - 1`, so it can never
+  be set equal to or above the first beep's own threshold, and the toggle is
+  disabled entirely once `threshold` is already 1% (there's no room left
+  below it). If a single HP drop crosses both thresholds at once (e.g. first
+  beep at 50%, second at 30%, and you take a hit from 55% straight to 20%),
+  both sounds play, the first one fully to completion before the second one
+  starts.
 - **Font** — Monospace/Proportional, or point `font_file` at any `.ttf`/`.otf`
   for a fully custom font.
 - **Font size** and **colour**.
@@ -190,6 +195,14 @@ By default, running `hpwarn` opens a window split into two parts:
 - **Configuration** (left) — the same settings as before: log path,
   threshold, font, colour, size, position. Changes save immediately and
   take effect right away (the overlay doesn't need restarting).
+  There's also a **"Clean log" button**, with a label reading "This will
+  delete *N* old log files". SWTOR never cleans up its own `combat_*.txt`
+  files, so this folder only grows over time; clicking the button deletes
+  every combat log in your configured log folder *except* the one hpwarn is
+  currently following. The count next to the button only gets recomputed
+  when a new combat log file is detected (the same moment history gets
+  cleared) or right after you click "Clean log" — it's deliberately not
+  checked continuously while HP tracking is running.
 - **History** (right) — above, a curve graph of your HP% over time; below,
   a scrollable list of every HP change, newest first, each showing the
   amount and (when the log identifies it) the ability and source, e.g.:
