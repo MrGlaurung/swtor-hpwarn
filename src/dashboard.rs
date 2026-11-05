@@ -2,7 +2,7 @@ use crate::config::{self, Config, FontStyle};
 use crate::state::SharedState;
 use crate::watcher::delete_other_combat_logs;
 use eframe::egui;
-use egui_plot::{HLine, Line, Plot, PlotPoints};
+use egui_plot::{HLine, Line, LineStyle, Plot, PlotPoints};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -291,10 +291,47 @@ impl DashboardApp {
             .show(ui, |plot_ui| {
                 // Fat reference lines at 0/50/100% so they're easy to spot
                 // at a glance against the thinner HP curve.
+                let first_warn = self.config.threshold as f64;
+                let second_warn_active = self.config.second_beep_enabled;
+                let second_warn = self.config.second_threshold as f64;
+
                 let gridline_color = egui::Color32::from_gray(110);
                 for y in [0.0, 50.0, 100.0] {
-                    plot_ui.hline(HLine::new(y).width(2.5_f32).color(gridline_color));
+                    // The first/second warning thresholds never land on 0 or
+                    // 100 (both sliders stop at 1/99), only ever possibly on
+                    // 50 - and only one of them can, since the second is
+                    // always kept below the first. When that happens, its
+                    // own dotted line (drawn below) takes the 50% mark's
+                    // place instead of the plain fat one.
+                    let overridden_by_warning =
+                        y == 50.0 && (first_warn == 50.0 || (second_warn_active && second_warn == 50.0));
+                    if !overridden_by_warning {
+                        plot_ui.hline(HLine::new(y).width(2.5_f32).color(gridline_color));
+                    }
                 }
+
+                // First warning threshold: a bright dotted line in the same
+                // colour as the overlay/beep itself, so it's immediately
+                // readable as "this is where the warning starts".
+                plot_ui.hline(
+                    HLine::new(first_warn)
+                        .width(2.0_f32)
+                        .color(self.config.color32())
+                        .style(LineStyle::dashed_dense()),
+                );
+
+                // Second, "panic" warning threshold: a dimmer grey dotted
+                // line - distinct enough from the first to tell them apart
+                // at a glance, but still clearly visible against the plot.
+                if second_warn_active {
+                    plot_ui.hline(
+                        HLine::new(second_warn)
+                            .width(1.6_f32)
+                            .color(egui::Color32::from_gray(165))
+                            .style(LineStyle::dotted_loose()),
+                    );
+                }
+
                 if !points.is_empty() {
                     plot_ui.line(Line::new(PlotPoints::from(points)).name("HP %"));
                 }

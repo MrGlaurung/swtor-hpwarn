@@ -219,6 +219,13 @@ By default, running `hpwarn` opens a window split into two parts:
   sampled on a timer — and both the curve and the list keep the most recent
   500 changes.
 
+  The graph always marks 0% and 100% with fat grey reference lines, plus
+  your first warning threshold as a bright dotted line (in the same colour
+  as the overlay) and, if the second "panic" beep is enabled, its threshold
+  as a dimmer grey dotted line. If either threshold happens to land exactly
+  on 50%, its dotted line takes the place of the usual fat 50% line there
+  instead of drawing both on top of each other.
+
 `hpwarn --configure` still works as a lightweight settings-only window (no
 overlay, no watcher, no history) if you just want to tweak the config file
 without the game running.
