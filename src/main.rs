@@ -91,6 +91,17 @@ fn main() -> anyhow::Result<()> {
 
     let config = Config::load(&config_path);
     let shared = Arc::new(SharedState::new(config.threshold, config.log_path.clone()));
+    // SharedState::new only seeds threshold/log_path; the watcher thread
+    // reads every other live-tunable knob straight from `shared`, so the
+    // rest of a freshly-loaded config (in particular the second beep's
+    // enabled flag/threshold) must be pushed in here too. Without this, a
+    // saved "second beep: on" from a previous run would show correctly in
+    // the dashboard's checkbox (it reads `config` directly) but the watcher
+    // would silently keep treating it as off until the dashboard's own UI
+    // happened to re-save it - i.e. the second beep just wouldn't fire,
+    // with no visible sign anything was wrong.
+    shared.set_second_beep_enabled(config.second_beep_enabled);
+    shared.set_second_threshold(config.second_threshold);
     {
         let shared = shared.clone();
         std::thread::spawn(move || watcher::run(shared));
