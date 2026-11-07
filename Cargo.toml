@@ -1,6 +1,6 @@
 [package]
 name = "hpwarn"
-version = "1.8.5"
+version = "1.8.6"
 edition = "2021"
 description = "Minimal SWTOR HP warning overlay: shows your HP% when it drops below a threshold and beeps once."
 

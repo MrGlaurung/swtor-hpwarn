@@ -349,6 +349,27 @@ fn feed_bytes(
                     continue;
                 }
                 *zone_grace = None;
+            } else if sample.cur == 1 {
+                // Entering an operation/flashpoint logs this same "1 HP"
+                // placeholder burst a couple of lines *before* the
+                // AreaEntered line itself (observed: a stim/buff line at
+                // cur=1, then AreaEntered a few ms later already carrying a
+                // real-looking value) - the reverse order of a simple
+                // zone/ship/taxi transfer, where AreaEntered comes first. A
+                // living character's HP is, for all practical purposes,
+                // never logged as exactly 1 outside of this placeholder, so
+                // treat any such reading as the start of a transition's
+                // grace window on its own, even with no zone_transition
+                // flag on this exact line yet. Without this, this one
+                // placeholder sample gets recorded as a real, massive HP
+                // drop straight to "1" before the AreaEntered line arrives
+                // a moment later to (correctly) reset the baseline - a
+                // false "you died" in the history right at that instant.
+                *last_cur = None;
+                *prev_above = None;
+                *prev_above_second = None;
+                *zone_grace = Some(Instant::now());
+                continue;
             }
 
             let pct = ((sample.cur as f64 / sample.max as f64) * 100.0)
@@ -534,6 +555,68 @@ mod tests {
         // The zone transition reset the baseline, so after it, last_cur is
         // the synced HP, ready to track real deltas again from here on.
         assert_eq!(last_cur, Some(410680));
+    }
+
+    /// Regression test: entering an operation/flashpoint logs the "1 HP"
+    /// placeholder burst a couple of lines *before* the AreaEntered line
+    /// (the reverse order of a simple zone/ship/taxi transfer, where
+    /// AreaEntered itself carries the "1 HP" placeholder). Real log
+    /// excerpt (Karagga's Palace entry): a stim line at cur=1, then
+    /// AreaEntered ~10ms later already carrying a real-looking, non-1
+    /// value. Without treating that leading "1" as a transition signal on
+    /// its own, it got recorded as a real, massive HP drop straight to
+    /// "1" - a false "you died" - before AreaEntered arrived to (correctly
+    /// but too late) reset the baseline.
+    #[test]
+    fn operation_entry_placeholder_before_area_entered_does_not_pollute_history() {
+        let shared = Arc::new(SharedState::new(50, String::new()));
+        let mut parser = LogParser::new();
+        let mut prev_above = None;
+        let mut prev_above_second = None;
+        let mut last_cur = None;
+        let mut zone_grace = None;
+        let mut leftover = String::new();
+
+        let establish_self = "[14:40:31.736] [@Rach'ka#687136982611430|(1377.05,-4645.32,-766.66,-180.00)|(374665/388091)] [=] [Mark of Power {4503122886000640}] [ApplyEffect {836045448945477}: Mark of Power {4503122886000911}]\n";
+
+        // A real reading just before entering the operation.
+        let before_entry = "[14:40:40.018] [@Rach'ka#687136982611430|(1367.39,-4615.83,-765.36,116.09)|(381190/388091)] [=] [Activate Random Mount {3719248404807680}] [Event {836045448945472}: AbilityActivate {836045448945479}]\n";
+
+        // The "1 HP" placeholder burst, arriving BEFORE AreaEntered - not
+        // itself flagged as a zone_transition by the parser.
+        let placeholder1 = "[14:41:05.754] [@Rach'ka#687136982611430|(125.67,35.44,5.03,55.10)|(1/374665)] [=] [Advanced Kyrprax Versatile Stim {4256329770205184}] [ApplyEffect {836045448945477}: Advanced Kyrprax Versatile Stim {4256329770205184}]\n";
+        let placeholder2 = "[14:41:05.755] [@Rach'ka#687136982611430|(125.67,35.44,5.03,55.10)|(1/374665)] [=] [Safe Login {973870949466112}] [ApplyEffect {836045448945477}: Safe Login Immunity {973870949466372}]\n";
+
+        // AreaEntered itself, a few ms later, carrying a real-looking
+        // (non-1) value - this is the actual bug: nothing before this line
+        // treated the earlier "1" readings as suspect.
+        let area_entered = "[14:41:05.763] [@Rach'ka#687136982611430|(125.67,35.44,5.03,55.10)|(374665/388091)] [] [] [AreaEntered {836045448953664}: Karagga's Palace {833571547775669} 8 Player Story {836045448953651}] (he4000) <v7.0.0b>\n";
+        let discipline_changed = "[14:41:05.763] [@Rach'ka#687136982611430|(125.67,35.44,5.03,55.10)|(374665/388091)] [] [] [DisciplineChanged {836045448953665}: Sorcerer {16141067119934185414}/Corruption {2031339142381587}]\n";
+
+        let all = format!(
+            "{establish_self}{before_entry}{placeholder1}{placeholder2}{area_entered}{discipline_changed}"
+        );
+        feed_bytes(
+            all.as_bytes(),
+            &mut leftover,
+            &mut parser,
+            &shared,
+            &mut prev_above,
+            &mut prev_above_second,
+            &mut last_cur,
+            &mut zone_grace,
+            true,
+        );
+
+        let history = shared.history.lock().unwrap();
+        assert!(
+            history.is_empty(),
+            "expected no bogus 'you died' history entry from the placeholder burst, got: {:?}",
+            *history
+        );
+        // The DisciplineChanged line (the first non-1 reading after the
+        // placeholder burst started) becomes the new silent baseline.
+        assert_eq!(last_cur, Some(374665));
     }
 
     #[test]

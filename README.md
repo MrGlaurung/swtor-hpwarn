@@ -40,6 +40,13 @@ the drop to the placeholder or the jump back to your real HP. Normal combat
 deaths and revives (a real 0 HP -> full HP jump, for instance) aren't
 affected, since those aren't zone transitions.
 
+Entering an operation or flashpoint logs this same "1 HP" placeholder burst
+too, but in the opposite order from a simple zone/ship/taxi transfer: the "1"
+shows up on a line or two *before* `AreaEntered` is logged, rather than on or
+after it. Any reading of exactly 1 HP - wherever it falls relative to
+`AreaEntered` - is treated as the same placeholder signal, so this is covered
+too.
+
 ### History clears on a new combat log
 
 SWTOR starts a fresh `combat_*.txt` file on relog, after a crash, or simply
