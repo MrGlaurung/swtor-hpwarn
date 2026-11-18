@@ -145,16 +145,28 @@ you see and I'll fix it.
 
 One such runtime quirk did turn up on a real Windows run: the overlay's
 text showed up on a solid black box instead of a transparent background.
-Cause: on Windows/macOS, the dashboard and the overlay windows share one
-process-wide OpenGL pixel format, chosen once at startup from the
-*dashboard's* own viewport settings (the overlay's own `transparent`
-request is too late to matter - by the time its window is created, the
-shared pixel format is already fixed). The dashboard didn't ask for
-transparency (it doesn't need any), so nothing in the process could get
-it, including the overlay. Fixed by requesting transparency on the
-dashboard's viewport too, while pinning its own background to fully
-opaque in code, so the dashboard keeps looking exactly as solid as
-before - only the overlay actually uses the now-available transparency.
+First attempt at a fix (requesting transparency on the dashboard's own
+viewport too, since both windows share one process-wide graphics context)
+turned out not to be enough - the real cause runs deeper than that.
+Plain OpenGL ("glow", the render backend Linux uses) simply cannot
+produce a window with real per-pixel transparency on Windows, full stop:
+DWM always treats an OpenGL window's swap chain as fully opaque, no
+matter what alpha value gets rendered into it. This isn't a bug in
+hpwarn's own code, or something fixable by requesting transparency
+harder - it's a long-standing, widely-documented limitation of OpenGL
+on Windows specifically (X11 and Wayland don't have this problem, which
+is why the overlay was already working correctly there).
+
+The actual fix: Windows and macOS builds now use the `wgpu` render
+backend instead of `glow` (Linux keeps `glow`, unaffected and unchanged).
+`wgpu`'s DX12/Vulkan backends use DXGI's "flip model" swap chains, which
+*do* support a transparent composite mode on Windows. Both backends still
+share one transparency flag across all of a run's windows (so the
+dashboard's own viewport still has to request "transparent" for the
+overlay to get it, same as before), and the dashboard still pins its own
+background to fully opaque in code either way, so it keeps looking
+exactly as solid as it always has - only the overlay actually becomes
+see-through.
 
 ### Giving it a proper icon (Linux)
 

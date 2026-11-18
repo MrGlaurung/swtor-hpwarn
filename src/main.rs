@@ -163,6 +163,16 @@ fn main() -> anyhow::Result<()> {
     // its root window and the overlay as a second, immediate-mode native
     // viewport alongside it - one process-wide event loop, still two real,
     // independently positioned OS windows.
+    //
+    // This also means Windows/macOS use the "wgpu" render backend (see
+    // Cargo.toml) instead of the "glow" (OpenGL) one Linux uses: a plain
+    // OpenGL window on Windows cannot be made to composite with real
+    // per-pixel transparency no matter what's rendered into it (DWM always
+    // treats a WGL swap chain as opaque), which is why the overlay first
+    // showed up as a solid black box there. wgpu's DX12/Vulkan backends use
+    // DXGI's "flip model" swap chains, which Windows does support a
+    // transparent composite mode for - see `run_combined` and
+    // `run_overlay` for the per-window side of this.
     #[cfg(not(target_os = "linux"))]
     {
         if args.no_dashboard {
@@ -276,23 +286,20 @@ fn run_combined(shared: Arc<SharedState>, config_path: PathBuf, config: Config) 
         .with_title(format!("hpwarn dashboard - v{VERSION}"))
         .with_app_id("hpwarn-dashboard")
         .with_window_level(egui::WindowLevel::Normal)
-        // On Windows/macOS, all of this run's windows share ONE GL context,
-        // and that context's pixel format is chosen once, up front, from
-        // this (the root/dashboard) viewport's own `transparent` flag - see
-        // eframe's `GlutinWindowContext::new`, which builds the shared
-        // `ConfigTemplateBuilder` with
-        // `.with_transparency(native_options.viewport.transparent...)`.
-        // Every other viewport (including the overlay, below) is then a
-        // window created against that same shared, already-fixed pixel
-        // format, so if THIS viewport doesn't ask for transparency, no
-        // viewport in the whole process can ever get it, no matter what it
-        // asks for itself - which is exactly why the overlay rendered as an
-        // opaque black box on Windows before this flag was added here. The
-        // dashboard window still looks fully solid despite this: a pixel
-        // format merely being alpha-*capable* doesn't make anything see-through
-        // on its own, only actually painting with alpha < 1.0 does (see the
-        // `clear_color` override below, which keeps the dashboard's own
-        // alpha pinned to fully opaque).
+        // Every viewport in this one `eframe::run_native` call shares a
+        // single `support_transparent_backbuffer` flag, which is taken once,
+        // up front, from this (the root/dashboard) viewport's own
+        // `transparent` setting - see `egui_wgpu::winit::Painter::new`
+        // (called with `native_options.viewport.transparent` and nothing
+        // viewport-specific) and `add_surface`, which applies that one flag
+        // to every surface it creates, overlay included. So if THIS
+        // viewport doesn't request transparency, no viewport in the whole
+        // process can ever get a transparent `CompositeAlphaMode`, no
+        // matter what it asks for itself. The dashboard window still looks
+        // fully solid despite this: being alpha-*capable* doesn't make
+        // anything see-through on its own, only actually painting with
+        // alpha < 1.0 does (see the `clear_color` override below, which
+        // keeps the dashboard's own alpha pinned to fully opaque).
         .with_transparent(true);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
