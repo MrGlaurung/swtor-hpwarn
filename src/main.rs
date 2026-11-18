@@ -107,22 +107,20 @@ fn main() -> anyhow::Result<()> {
         std::thread::spawn(move || watcher::run(shared));
     }
 
-    // The overlay runs on its own background thread so the dashboard (if
-    // shown) can own the main thread. On Wayland this is a plain Wayland
-    // client with no GUI toolkit event loop of its own, so it's always
-    // thread-safe to run this way. On X11/Windows it's a second eframe/winit
-    // window; winit's "must run on the main thread" restriction is a macOS
-    // requirement, not an X11 or Windows one, so a background thread works
-    // fine here.
+    // Linux: the overlay runs on its own background thread so the dashboard
+    // (if shown) can own the main thread. On Wayland this is a plain
+    // Wayland client with no GUI toolkit event loop of its own, so it's
+    // always thread-safe to run this way. On the X11 fallback it's a second
+    // eframe/winit window on a second thread - this works on Linux's winit
+    // backend (unlike Windows, see run_combined below).
+    #[cfg(target_os = "linux")]
     {
-        let shared = shared.clone();
-        let config_path = config_path.clone();
-        let config = config.clone();
-        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-        let no_layer_shell = args.no_layer_shell;
-        std::thread::spawn(move || {
-            #[cfg(target_os = "linux")]
-            {
+        {
+            let shared = shared.clone();
+            let config_path = config_path.clone();
+            let config = config.clone();
+            let no_layer_shell = args.no_layer_shell;
+            std::thread::spawn(move || {
                 let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
                 if is_wayland && !no_layer_shell {
                     match wayland_overlay::run(shared.clone(), config_path.clone(), config.clone()) {
@@ -138,27 +136,40 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-            }
-            // On Windows (and as the Linux fallback above), a plain
-            // always-on-top eframe window is all that's needed - Windows
-            // doesn't have the fullscreen-unredirect problem Wayland
-            // compositors have, so this works reliably as-is.
-            if let Err(e) = run_overlay(shared, config_path, config) {
-                eprintln!("hpwarn: overlay window failed: {e}");
-            }
-        });
-    }
-
-    if args.no_dashboard {
-        // Nothing left to do on the main thread; park it so the process
-        // doesn't exit while the background threads are still running.
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
+                if let Err(e) = run_overlay(shared, config_path, config) {
+                    eprintln!("hpwarn: overlay window failed: {e}");
+                }
+            });
         }
+
+        if args.no_dashboard {
+            // Nothing left to do on the main thread; park it so the process
+            // doesn't exit while the background threads are still running.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+
+        run_dashboard(shared, config_path, config).map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(());
     }
 
-    run_dashboard(shared, config_path, config).map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(())
+    // Windows (and macOS): winit only ever allows ONE event loop for the
+    // whole process - not one-at-a-time, but ever, even sequentially across
+    // threads - so the Linux approach above (two separate `eframe::run_native`
+    // calls, each creating its own event loop) fails there with exactly the
+    // error this was built to fix: "EventLoop can't be recreated". Instead,
+    // run a single eframe app on the main thread that hosts the dashboard as
+    // its root window and the overlay as a second, immediate-mode native
+    // viewport alongside it - one process-wide event loop, still two real,
+    // independently positioned OS windows.
+    #[cfg(not(target_os = "linux"))]
+    {
+        if args.no_dashboard {
+            return run_overlay(shared, config_path, config).map_err(|e| anyhow::anyhow!("{e}"));
+        }
+        return run_combined(shared, config_path, config).map_err(|e| anyhow::anyhow!("{e}"));
+    }
 }
 
 fn run_configure(config_path: PathBuf) -> eframe::Result<()> {
@@ -220,16 +231,7 @@ fn run_dashboard(shared: Arc<SharedState>, config_path: PathBuf, config: Config)
 /// The plain eframe/winit overlay: used on X11, and as a fallback on
 /// Wayland compositors that don't support wlr-layer-shell.
 fn run_overlay(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([420.0, 90.0])
-        .with_position([config.pos_x, config.pos_y])
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_always_on_top()
-        .with_resizable(false)
-        .with_title("hpwarn")
-        .with_app_id("hpwarn")
-        .with_taskbar(false);
+    let mut viewport = overlay_viewport_builder(&config);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -243,4 +245,111 @@ fn run_overlay(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -
         native_options,
         Box::new(move |_cc| Ok(Box::new(overlay::OverlayApp::new(shared, config_path, config)))),
     )
+}
+
+/// The overlay window's properties - shared between `run_overlay` (its own
+/// standalone `eframe::run_native` call, used on Linux) and `run_combined`'s
+/// second, immediate-mode viewport (used on Windows/macOS).
+fn overlay_viewport_builder(config: &Config) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_inner_size([420.0, 90.0])
+        .with_position([config.pos_x, config.pos_y])
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top()
+        .with_resizable(false)
+        .with_title("hpwarn")
+        .with_app_id("hpwarn")
+        .with_taskbar(false)
+}
+
+/// Windows/macOS only: a single `eframe::run_native` call hosting both the
+/// dashboard (root viewport) and the overlay (a second, immediate-mode
+/// viewport) in one process-wide winit event loop. See the comment at the
+/// call site in `main` for why this exists - Linux keeps the simpler
+/// separate-window-per-thread approach (`run_dashboard` + `run_overlay`),
+/// which doesn't work on Windows.
+#[cfg(not(target_os = "linux"))]
+fn run_combined(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([900.0, 600.0])
+        .with_title(format!("hpwarn dashboard - v{VERSION}"))
+        .with_app_id("hpwarn-dashboard")
+        .with_window_level(egui::WindowLevel::Normal);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let native_options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+
+    let mut overlay_viewport = overlay_viewport_builder(&config);
+    if let Some(icon) = app_icon() {
+        overlay_viewport = overlay_viewport.with_icon(icon);
+    }
+
+    eframe::run_native(
+        "hpwarn-dashboard",
+        native_options,
+        Box::new(move |_cc| {
+            let dashboard = dashboard::DashboardApp::new(config_path.clone(), config.clone(), shared.clone());
+            let overlay = overlay::OverlayApp::new(shared, config_path, config);
+            Ok(Box::new(CombinedApp {
+                dashboard,
+                overlay,
+                overlay_viewport_id: egui::ViewportId::from_hash_of("hpwarn-overlay"),
+                overlay_viewport,
+                painting_overlay: std::cell::Cell::new(false),
+            }))
+        }),
+    )
+}
+
+/// Hosts the dashboard (root viewport) and the overlay (a second,
+/// immediate-mode viewport drawn from inside the root's own `update`) as one
+/// combined `eframe::App`. Only used on Windows/macOS - see `run_combined`.
+#[cfg(not(target_os = "linux"))]
+struct CombinedApp {
+    dashboard: dashboard::DashboardApp,
+    overlay: overlay::OverlayApp,
+    overlay_viewport_id: egui::ViewportId,
+    overlay_viewport: egui::ViewportBuilder,
+    /// `eframe::App::clear_color` has no way to know which viewport is
+    /// currently being painted (the dashboard needs its normal background,
+    /// the overlay needs full transparency), so this is toggled around the
+    /// `show_viewport_immediate` call below: true while the overlay's own
+    /// paint pass is in progress (which queries `clear_color` before
+    /// `overlay.render` runs), false the rest of the time (covering the
+    /// dashboard/root's own paint pass, before and after).
+    painting_overlay: std::cell::Cell<bool>,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl eframe::App for CombinedApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.painting_overlay.get() {
+            [0.0, 0.0, 0.0, 0.0] // fully transparent, for the overlay
+        } else {
+            // eframe's own default (see eframe::App::clear_color) - the
+            // dashboard doesn't customise this.
+            egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
+        }
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.dashboard.render(ctx);
+
+        // Immediate viewports only repaint when the root/parent viewport
+        // also repaints, so keep the root's own cadence at least as tight
+        // as the overlay wants (80ms) rather than the dashboard's more
+        // relaxed 200ms, to keep the overlay responsive during a fight.
+        ctx.request_repaint_after(std::time::Duration::from_millis(80));
+
+        self.painting_overlay.set(true);
+        ctx.show_viewport_immediate(self.overlay_viewport_id, self.overlay_viewport.clone(), |overlay_ctx, _class| {
+            self.overlay.render(overlay_ctx);
+        });
+        self.painting_overlay.set(false);
+    }
 }

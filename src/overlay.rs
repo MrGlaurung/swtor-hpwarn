@@ -76,12 +76,15 @@ impl OverlayApp {
     }
 }
 
-impl eframe::App for OverlayApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0] // fully transparent background
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl OverlayApp {
+    /// The actual per-frame overlay drawing, factored out of `eframe::App::update`
+    /// so it can be driven either as its own standalone `eframe::run_native`
+    /// window (Linux: a background thread, its own winit event loop - fine
+    /// there) or as a second, immediate-mode viewport inside a single
+    /// combined app (Windows/macOS: winit only ever allows one event loop
+    /// per process, so the overlay and dashboard have to share it - see
+    /// `main::run_combined`).
+    pub fn render(&mut self, ctx: &egui::Context) {
         self.maybe_reload_config();
         self.apply_custom_font(ctx);
 
@@ -95,7 +98,10 @@ impl eframe::App for OverlayApp {
 
         let pct = *self.shared.pct.lock().unwrap();
         let threshold = self.config.threshold;
-        let show = matches!(pct, Some(p) if p <= threshold);
+        // "Test overlay position" (dashboard button) forces the overlay to
+        // show regardless of actual HP%, so it can be seen/positioned
+        // without needing to actually be low on HP.
+        let show = self.shared.test_overlay_active() || matches!(pct, Some(p) if p <= threshold);
 
         let panel_frame = egui::Frame::none().fill(egui::Color32::TRANSPARENT);
         egui::CentralPanel::default()
@@ -138,5 +144,15 @@ impl eframe::App for OverlayApp {
 
         // Light refresh rate: plenty responsive for a text readout, cheap on CPU.
         ctx.request_repaint_after(Duration::from_millis(80));
+    }
+}
+
+impl eframe::App for OverlayApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0] // fully transparent background
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.render(ctx);
     }
 }

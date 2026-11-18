@@ -1,3 +1,4 @@
+use crate::audio;
 use crate::config::{self, Config, FontStyle};
 use crate::state::SharedState;
 use crate::watcher::delete_other_combat_logs;
@@ -206,6 +207,28 @@ impl DashboardApp {
             changed |= ui.add(egui::DragValue::new(&mut self.config.pos_y).prefix("y: ")).changed();
         });
 
+        ui.add_space(12.0);
+        ui.separator();
+        ui.label("Test:");
+        ui.horizontal(|ui| {
+            let testing = self.shared.test_overlay_active();
+            let label = if testing { "Stop testing overlay" } else { "Test overlay position" };
+            if ui.button(label).clicked() {
+                self.shared.set_test_overlay_active(!testing);
+            }
+            if testing {
+                ui.weak("on screen - drag it (X11/Windows) or set x/y above (Wayland)");
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Test first beep").clicked() {
+                audio::play_boing();
+            }
+            if ui.button("Test second (panic) beep").clicked() {
+                audio::play_panic();
+            }
+        });
+
         ui.add_space(16.0);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
@@ -367,8 +390,14 @@ impl DashboardApp {
     }
 }
 
-impl eframe::App for DashboardApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl DashboardApp {
+    /// The actual per-frame dashboard drawing, factored out of
+    /// `eframe::App::update` so it can be driven either as its own
+    /// standalone `eframe::run_native` window (Linux, on the main thread)
+    /// or as the root viewport of a single combined app that also hosts the
+    /// overlay as a second viewport (Windows/macOS - see
+    /// `main::run_combined`).
+    pub fn render(&mut self, ctx: &egui::Context) {
         // Repaint regularly even with no user input, since HP/history/curve
         // change from the background watcher thread, not from UI events.
         ctx.request_repaint_after(Duration::from_millis(200));
@@ -387,5 +416,11 @@ impl eframe::App for DashboardApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.history_panel(ui);
         });
+    }
+}
+
+impl eframe::App for DashboardApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.render(ctx);
     }
 }

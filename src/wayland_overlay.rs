@@ -270,7 +270,12 @@ pub fn run(
         }
 
         let pct = *shared.pct.lock().unwrap();
-        let show = matches!(pct, Some(p) if p <= config.threshold);
+        // "Test overlay position" (dashboard button) forces the overlay to
+        // show regardless of actual HP%, so it can be seen without needing
+        // to actually be low on HP. On Wayland there's no drag support, so
+        // repositioning while testing is done via pos_x/pos_y in the
+        // dashboard, same as normal - this hot-reloads like everything else.
+        let show = shared.test_overlay_active() || matches!(pct, Some(p) if p <= config.threshold);
 
         if show != last_shown.unwrap_or(!show) || (show && pct != last_pct) {
             buf.clear();

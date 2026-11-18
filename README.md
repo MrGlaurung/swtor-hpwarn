@@ -104,14 +104,44 @@ should just work. The window icon likewise doesn't need the `.desktop`-file
 workaround on Windows - `WM_SETICON` (which hpwarn's embedded icon goes
 through) is honoured directly by the taskbar and alt-tab switcher.
 
+### Windows/macOS: one combined window host, not two
+
+On Linux, the dashboard and the overlay are two completely independent
+windows, each created by its own `eframe::run_native` call on its own
+thread - each gets its own `winit` event loop, and Linux's X11/Wayland
+backends are fine with that. Windows (and macOS) are not: `winit` only
+ever allows a single event loop for the whole process - not "one at a
+time", but one, ever, even created sequentially on different threads -
+so the Linux approach fails there with exactly the error this was
+written to fix: `winit EventLoopError: EventLoop can't be recreated`
+(whichever of the two `run_native` calls lost the race to create the
+process's one-and-only event loop crashed with that error; which one
+depended on thread-scheduling timing, so it could even seem to work
+intermittently).
+
+So on Windows/macOS, hpwarn instead runs a single combined `eframe` app
+on the main thread, hosting the dashboard as its root window and the
+overlay as a second native viewport (via egui's `show_viewport_immediate`)
+drawn from inside the same app - one process-wide event loop, but still
+two real, independently-positioned, independently-movable OS windows.
+Functionally this should look and behave identically to the Linux
+version (same dragging, same hot-reload, same test buttons, same
+always-on-top behaviour) - it's purely a change to how the two windows
+share the OS's event loop under the hood. Linux is untouched by this and
+keeps using the original two-threads/two-event-loops approach.
+
 One thing I haven't been able to verify myself: I don't have a Windows
-machine or a working Rust-for-Windows cross-compiler available in the
-environment I built this in, so while the above should build cleanly (the
-Windows-only code paths are small and use well-trodden, cross-platform
-crates - `eframe`/`winit` for the window, `cpal`/`rodio` for audio), I
-haven't actually run a build or the resulting app on Windows. If
-`cargo build --release` hits anything unexpected there, let me know what it
-says and I'll fix it.
+machine, and the sandbox I'm building this in blocks installing the
+Windows Rust target (`rustup target add x86_64-pc-windows-gnu` fails
+there due to a network policy restriction on `static.rust-lang.org`), so
+I could not compile-check the Windows/macOS-specific code path at all in
+this round - not even a cross-compile, let alone an actual run. I
+reviewed it carefully by hand against egui/eframe's own source instead,
+but that's not a substitute for a real build. If `cargo build --release`
+on an actual Windows machine hits anything unexpected - a compile error,
+or the app building but misbehaving at runtime (wrong window stacking,
+the overlay not appearing, odd positioning) - let me know exactly what
+you see and I'll fix it.
 
 ### Giving it a proper icon (Linux)
 
@@ -210,6 +240,17 @@ By default, running `hpwarn` opens a window split into two parts:
   when a new combat log file is detected (the same moment history gets
   cleared) or right after you click "Clean log" — it's deliberately not
   checked continuously while HP tracking is running.
+
+  There are also three **test buttons**, so you can check your setup
+  without needing to actually be low on HP in-game:
+  - **Test overlay position** — forces the overlay to show (at your current
+    HP%, or 0% if unknown) regardless of the threshold, and leaves it
+    showing until you click the button again ("Stop testing overlay"). Move
+    it the normal way while it's up: drag it on X11/Windows, or set
+    `x`/`y` above on Wayland (hot-reloaded live, same as always).
+  - **Test first beep** / **Test second (panic) beep** — plays each warning
+    sound once on demand, so you can hear what they sound like without
+    waiting for your HP to actually cross a threshold.
 - **History** (right) — above, a curve graph of your HP% over time; below,
   a scrollable list of every HP change, newest first, each showing the
   amount and (when the log identifies it) the ability and source, e.g.:

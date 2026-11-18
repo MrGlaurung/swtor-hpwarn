@@ -60,6 +60,12 @@ pub struct SharedState {
     /// Recomputed only when a new combat log file is detected (alongside
     /// `clear_history`), not polled continuously while tracking HP.
     pub old_log_count: AtomicUsize,
+    /// Forces the overlay to show, regardless of your actual HP%, so you can
+    /// see/position it without needing to actually be low on HP. Toggled by
+    /// the dashboard's "Test overlay position" button; both overlay
+    /// implementations (X11/Windows and native Wayland) check this
+    /// alongside the normal threshold check.
+    pub test_overlay_active: AtomicBool,
 }
 
 impl SharedState {
@@ -75,6 +81,7 @@ impl SharedState {
             second_threshold: AtomicU8::new(1),
             current_log_file: Mutex::new(None),
             old_log_count: AtomicUsize::new(0),
+            test_overlay_active: AtomicBool::new(false),
         }
     }
 
@@ -124,6 +131,14 @@ impl SharedState {
 
     pub fn log_path(&self) -> String {
         self.log_path.lock().unwrap().clone()
+    }
+
+    pub fn set_test_overlay_active(&self, v: bool) {
+        self.test_overlay_active.store(v, Ordering::Relaxed);
+    }
+
+    pub fn test_overlay_active(&self) -> bool {
+        self.test_overlay_active.load(Ordering::Relaxed)
     }
 
     pub fn set_status(&self, s: impl Into<String>) {
