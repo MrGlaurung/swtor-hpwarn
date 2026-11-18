@@ -275,7 +275,25 @@ fn run_combined(shared: Arc<SharedState>, config_path: PathBuf, config: Config) 
         .with_inner_size([900.0, 600.0])
         .with_title(format!("hpwarn dashboard - v{VERSION}"))
         .with_app_id("hpwarn-dashboard")
-        .with_window_level(egui::WindowLevel::Normal);
+        .with_window_level(egui::WindowLevel::Normal)
+        // On Windows/macOS, all of this run's windows share ONE GL context,
+        // and that context's pixel format is chosen once, up front, from
+        // this (the root/dashboard) viewport's own `transparent` flag - see
+        // eframe's `GlutinWindowContext::new`, which builds the shared
+        // `ConfigTemplateBuilder` with
+        // `.with_transparency(native_options.viewport.transparent...)`.
+        // Every other viewport (including the overlay, below) is then a
+        // window created against that same shared, already-fixed pixel
+        // format, so if THIS viewport doesn't ask for transparency, no
+        // viewport in the whole process can ever get it, no matter what it
+        // asks for itself - which is exactly why the overlay rendered as an
+        // opaque black box on Windows before this flag was added here. The
+        // dashboard window still looks fully solid despite this: a pixel
+        // format merely being alpha-*capable* doesn't make anything see-through
+        // on its own, only actually painting with alpha < 1.0 does (see the
+        // `clear_color` override below, which keeps the dashboard's own
+        // alpha pinned to fully opaque).
+        .with_transparent(true);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -331,9 +349,21 @@ impl eframe::App for CombinedApp {
         if self.painting_overlay.get() {
             [0.0, 0.0, 0.0, 0.0] // fully transparent, for the overlay
         } else {
-            // eframe's own default (see eframe::App::clear_color) - the
-            // dashboard doesn't customise this.
-            egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
+            // eframe's own default clear colour (see eframe::App::clear_color)
+            // is actually only ~70% opaque (alpha 180/255) - normally
+            // invisible, because a normal eframe window's pixel format has
+            // no alpha channel at all, so the alpha is simply discarded and
+            // the window looks fully solid no matter what. Here, though,
+            // the dashboard's own viewport had to be marked `transparent`
+            // (see `run_combined`) purely so the *overlay* viewport - which
+            // shares the same, process-wide GL pixel format - can actually
+            // get one. That makes the dashboard's own alpha channel real,
+            // so using the normal ~70%-opacity default here would make the
+            // dashboard genuinely see-through on Windows/macOS. Pin it to
+            // fully opaque instead, so it keeps looking exactly like it
+            // does on Linux (where the dashboard's own window never asks
+            // for transparency, and this override doesn't apply at all).
+            egui::Color32::from_rgba_unmultiplied(12, 12, 12, 255).to_normalized_gamma_f32()
         }
     }
 

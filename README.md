@@ -143,6 +143,19 @@ or the app building but misbehaving at runtime (wrong window stacking,
 the overlay not appearing, odd positioning) - let me know exactly what
 you see and I'll fix it.
 
+One such runtime quirk did turn up on a real Windows run: the overlay's
+text showed up on a solid black box instead of a transparent background.
+Cause: on Windows/macOS, the dashboard and the overlay windows share one
+process-wide OpenGL pixel format, chosen once at startup from the
+*dashboard's* own viewport settings (the overlay's own `transparent`
+request is too late to matter - by the time its window is created, the
+shared pixel format is already fixed). The dashboard didn't ask for
+transparency (it doesn't need any), so nothing in the process could get
+it, including the overlay. Fixed by requesting transparency on the
+dashboard's viewport too, while pinning its own background to fully
+opaque in code, so the dashboard keeps looking exactly as solid as
+before - only the overlay actually uses the now-available transparency.
+
 ### Giving it a proper icon (Linux)
 
 Without this step, your taskbar/launcher/alt-tab will likely show a generic
