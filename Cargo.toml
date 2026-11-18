@@ -1,6 +1,6 @@
 [package]
 name = "hpwarn"
-version = "1.8.9"
+version = "1.8.10"
 edition = "2021"
 description = "Minimal SWTOR HP warning overlay: shows your HP% when it drops below a threshold and beeps once."
 
@@ -19,6 +19,14 @@ rodio = { version = "0.19", default-features = false }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Lets eframe/wgpu/winit's own internal diagnostics (which normally go
+# nowhere, since nothing was listening) actually reach the console window -
+# see the `env_logger::Builder` call at the top of `main()`. In particular,
+# wgpu logs a warning when it can't actually get a transparent composite
+# mode for a window that asked for one, which is directly relevant to
+# diagnosing the overlay's background on Windows.
+log = "0.4"
+env_logger = "0.11"
 
 # Only used by src/wayland_overlay.rs, hpwarn's native wlr-layer-shell
 # overlay - a Linux/Wayland-only mechanism that exists to route around a

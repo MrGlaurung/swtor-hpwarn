@@ -77,6 +77,14 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Normally nothing is listening for eframe/wgpu/winit's own internal
+    // `log::warn!`/`log::error!` calls, so they go nowhere - this routes
+    // them to stderr, which already shows up in the console window hpwarn
+    // runs from. Defaults to showing warnings and errors only (set
+    // `RUST_LOG=debug` or `RUST_LOG=wgpu_hal=debug` etc. before running for
+    // more detail).
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
     let args = Args::parse();
     let config_path = args.config.unwrap_or_else(config::default_config_path);
 
