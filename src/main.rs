@@ -5,6 +5,7 @@ mod dashboard;
 mod overlay;
 mod parser;
 mod state;
+mod text_canvas;
 mod watcher;
 // The native Wayland layer-shell overlay only exists to route around a
 // Linux-compositor-specific problem (see overlay.rs/README): compositors
@@ -15,6 +16,11 @@ mod watcher;
 // need to exist (and only need to compile) on Linux.
 #[cfg(target_os = "linux")]
 mod wayland_overlay;
+// The native Windows overlay (see win_overlay.rs for the full story on why
+// it exists - short version: eframe/winit can't actually give a window real
+// transparency on Windows, so this bypasses them entirely for the overlay).
+#[cfg(target_os = "windows")]
+mod win_overlay;
 
 use clap::Parser;
 use config::Config;
@@ -77,12 +83,11 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Normally nothing is listening for eframe/wgpu/winit's own internal
+    // Normally nothing is listening for eframe/winit's own internal
     // `log::warn!`/`log::error!` calls, so they go nowhere - this routes
     // them to stderr, which already shows up in the console window hpwarn
     // runs from. Defaults to showing warnings and errors only (set
-    // `RUST_LOG=debug` or `RUST_LOG=wgpu_hal=debug` etc. before running for
-    // more detail).
+    // `RUST_LOG=debug` before running for more detail).
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let args = Args::parse();
@@ -162,26 +167,47 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Windows (and macOS): winit only ever allows ONE event loop for the
-    // whole process - not one-at-a-time, but ever, even sequentially across
-    // threads - so the Linux approach above (two separate `eframe::run_native`
-    // calls, each creating its own event loop) fails there with exactly the
-    // error this was built to fix: "EventLoop can't be recreated". Instead,
-    // run a single eframe app on the main thread that hosts the dashboard as
-    // its root window and the overlay as a second, immediate-mode native
-    // viewport alongside it - one process-wide event loop, still two real,
-    // independently positioned OS windows.
-    //
-    // This also means Windows/macOS use the "wgpu" render backend (see
-    // Cargo.toml) instead of the "glow" (OpenGL) one Linux uses: a plain
-    // OpenGL window on Windows cannot be made to composite with real
-    // per-pixel transparency no matter what's rendered into it (DWM always
-    // treats a WGL swap chain as opaque), which is why the overlay first
-    // showed up as a solid black box there. wgpu's DX12/Vulkan backends use
-    // DXGI's "flip model" swap chains, which Windows does support a
-    // transparent composite mode for - see `run_combined` and
-    // `run_overlay` for the per-window side of this.
-    #[cfg(not(target_os = "linux"))]
+    // Windows: the overlay is a small native win32 window (win_overlay.rs),
+    // not an eframe/winit window at all - see that module's own doc comment
+    // for the full story of why (short version: eframe/winit can't actually
+    // give a window real per-pixel transparency on Windows, by any backend).
+    // Because of that, this goes back to looking just like the Linux branch
+    // above: the overlay runs on its own background thread, and the
+    // dashboard owns the main thread via its own ordinary, standalone
+    // `eframe::run_native` call - there's no winit "one event loop per
+    // process" conflict to work around here, since the overlay's win32
+    // message loop isn't a winit event loop in the first place.
+    #[cfg(target_os = "windows")]
+    {
+        {
+            let shared = shared.clone();
+            let config_path = config_path.clone();
+            let config = config.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = win_overlay::run(shared, config_path, config) {
+                    eprintln!("hpwarn: overlay window failed: {e}");
+                }
+            });
+        }
+
+        if args.no_dashboard {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+
+        run_dashboard(shared, config_path, config).map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(());
+    }
+
+    // macOS (or anything else that's neither Linux nor Windows): kept on the
+    // older combined dashboard+overlay approach (see `run_combined`). This
+    // was built for Windows and turned out not to actually work there (see
+    // win_overlay.rs), but macOS's windowing has never been confirmed
+    // broken the same way - Core Animation does support real per-pixel
+    // window transparency - and this app has never actually been run on a
+    // Mac at all, so this is left alone rather than guessed at further.
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         if args.no_dashboard {
             return run_overlay(shared, config_path, config).map_err(|e| anyhow::anyhow!("{e}"));
@@ -246,8 +272,9 @@ fn run_dashboard(shared: Arc<SharedState>, config_path: PathBuf, config: Config)
     )
 }
 
-/// The plain eframe/winit overlay: used on X11, and as a fallback on
-/// Wayland compositors that don't support wlr-layer-shell.
+/// The plain eframe/winit overlay: used on X11, as a fallback on Wayland
+/// compositors that don't support wlr-layer-shell, and (via `run_combined`)
+/// on macOS. Not used on Windows - see `win_overlay.rs` for why.
 fn run_overlay(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
     let mut viewport = overlay_viewport_builder(&config);
     if let Some(icon) = app_icon() {
@@ -266,8 +293,8 @@ fn run_overlay(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -
 }
 
 /// The overlay window's properties - shared between `run_overlay` (its own
-/// standalone `eframe::run_native` call, used on Linux) and `run_combined`'s
-/// second, immediate-mode viewport (used on Windows/macOS).
+/// standalone `eframe::run_native` call, used on Linux's X11 path) and
+/// `run_combined`'s second, immediate-mode viewport (used on macOS).
 fn overlay_viewport_builder(config: &Config) -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         .with_inner_size([420.0, 90.0])
@@ -281,13 +308,15 @@ fn overlay_viewport_builder(config: &Config) -> egui::ViewportBuilder {
         .with_taskbar(false)
 }
 
-/// Windows/macOS only: a single `eframe::run_native` call hosting both the
-/// dashboard (root viewport) and the overlay (a second, immediate-mode
-/// viewport) in one process-wide winit event loop. See the comment at the
-/// call site in `main` for why this exists - Linux keeps the simpler
-/// separate-window-per-thread approach (`run_dashboard` + `run_overlay`),
-/// which doesn't work on Windows.
-#[cfg(not(target_os = "linux"))]
+/// macOS only (see the comment at the call site in `main`): a single
+/// `eframe::run_native` call hosting both the dashboard (root viewport) and
+/// the overlay (a second, immediate-mode viewport) in one process-wide
+/// winit event loop. This was originally written for Windows too, to work
+/// around winit's one-event-loop-per-process limit there - but it turned
+/// out winit/eframe can't actually give a window real transparency on
+/// Windows by any available backend, so Windows now uses a dedicated native
+/// overlay instead (`win_overlay.rs`) and no longer needs this at all.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn run_combined(shared: Arc<SharedState>, config_path: PathBuf, config: Config) -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([900.0, 600.0])
@@ -341,8 +370,8 @@ fn run_combined(shared: Arc<SharedState>, config_path: PathBuf, config: Config) 
 
 /// Hosts the dashboard (root viewport) and the overlay (a second,
 /// immediate-mode viewport drawn from inside the root's own `update`) as one
-/// combined `eframe::App`. Only used on Windows/macOS - see `run_combined`.
-#[cfg(not(target_os = "linux"))]
+/// combined `eframe::App`. Only used on macOS - see `run_combined`.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 struct CombinedApp {
     dashboard: dashboard::DashboardApp,
     overlay: overlay::OverlayApp,
@@ -358,7 +387,7 @@ struct CombinedApp {
     painting_overlay: std::cell::Cell<bool>,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl eframe::App for CombinedApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         if self.painting_overlay.get() {
@@ -374,10 +403,10 @@ impl eframe::App for CombinedApp {
             // shares the same, process-wide GL pixel format - can actually
             // get one. That makes the dashboard's own alpha channel real,
             // so using the normal ~70%-opacity default here would make the
-            // dashboard genuinely see-through on Windows/macOS. Pin it to
-            // fully opaque instead, so it keeps looking exactly like it
-            // does on Linux (where the dashboard's own window never asks
-            // for transparency, and this override doesn't apply at all).
+            // dashboard genuinely see-through. Pin it to fully opaque
+            // instead, so it keeps looking exactly like it does on Linux
+            // (where the dashboard's own window never asks for
+            // transparency, and this override doesn't apply at all).
             egui::Color32::from_rgba_unmultiplied(12, 12, 12, 255).to_normalized_gamma_f32()
         }
     }

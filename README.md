@@ -104,69 +104,65 @@ should just work. The window icon likewise doesn't need the `.desktop`-file
 workaround on Windows - `WM_SETICON` (which hpwarn's embedded icon goes
 through) is honoured directly by the taskbar and alt-tab switcher.
 
-### Windows/macOS: one combined window host, not two
+### Windows: the overlay is a native win32 window, not an eframe window
 
-On Linux, the dashboard and the overlay are two completely independent
-windows, each created by its own `eframe::run_native` call on its own
-thread - each gets its own `winit` event loop, and Linux's X11/Wayland
-backends are fine with that. Windows (and macOS) are not: `winit` only
-ever allows a single event loop for the whole process - not "one at a
-time", but one, ever, even created sequentially on different threads -
-so the Linux approach fails there with exactly the error this was
-written to fix: `winit EventLoopError: EventLoop can't be recreated`
-(whichever of the two `run_native` calls lost the race to create the
-process's one-and-only event loop crashed with that error; which one
-depended on thread-scheduling timing, so it could even seem to work
-intermittently).
+Getting a genuinely transparent overlay working on Windows took three
+tries, and the final answer ended up being a different kind of window
+entirely rather than a graphics-backend setting. Worth writing down in
+case anything about it ever needs revisiting:
 
-So on Windows/macOS, hpwarn instead runs a single combined `eframe` app
-on the main thread, hosting the dashboard as its root window and the
-overlay as a second native viewport (via egui's `show_viewport_immediate`)
-drawn from inside the same app - one process-wide event loop, but still
-two real, independently-positioned, independently-movable OS windows.
-Functionally this should look and behave identically to the Linux
-version (same dragging, same hot-reload, same test buttons, same
-always-on-top behaviour) - it's purely a change to how the two windows
-share the OS's event loop under the hood. Linux is untouched by this and
-keeps using the original two-threads/two-event-loops approach.
+1. **First try**: eframe/winit's own "transparent window" support,
+   using the `glow` (OpenGL) backend Linux already uses successfully.
+   On Windows this produced a solid black box instead of a transparent
+   background. Cause: winit's Windows backend makes a window
+   "transparent" via `DwmEnableBlurBehindWindow`, an old (Vista/7-era)
+   DWM trick that only has any effect on windows using the *older*,
+   desktop-redirection-bitmap presentation path - and a modern OpenGL
+   driver on Windows doesn't use that path.
+2. **Second try**: switch to the `wgpu` render backend (DX12/Vulkan),
+   on the theory that its "flip model" swap chains support a genuinely
+   transparent composite mode. This changed *which* opaque fallback
+   showed (white instead of black) but still never produced real
+   transparency - flip-model presentation bypasses the same desktop
+   redirection bitmap `DwmEnableBlurBehindWindow` depends on, for a
+   different reason than OpenGL does, so the same old DWM trick still
+   had nothing to act on.
+3. **What actually works**: bypass eframe/winit entirely for the
+   overlay. `src/win_overlay.rs` is a small, dedicated native Win32
+   window using `UpdateLayeredWindow` - the API real Windows HUD and
+   game-overlay utilities use for exactly this, supported since Windows
+   2000, and with no dependency on which graphics backend (if any) a
+   process otherwise uses. It draws its text with the exact same
+   software rasterizer the Linux layer-shell overlay uses
+   (`src/text_canvas.rs`, shared between the two), then hands the
+   resulting premultiplied-alpha bitmap straight to Windows.
 
-One thing I haven't been able to verify myself: I don't have a Windows
-machine, and the sandbox I'm building this in blocks installing the
-Windows Rust target (`rustup target add x86_64-pc-windows-gnu` fails
-there due to a network policy restriction on `static.rust-lang.org`), so
-I could not compile-check the Windows/macOS-specific code path at all in
-this round - not even a cross-compile, let alone an actual run. I
-reviewed it carefully by hand against egui/eframe's own source instead,
-but that's not a substitute for a real build. If `cargo build --release`
-on an actual Windows machine hits anything unexpected - a compile error,
-or the app building but misbehaving at runtime (wrong window stacking,
-the overlay not appearing, odd positioning) - let me know exactly what
-you see and I'll fix it.
+Since the overlay no longer touches eframe/winit at all on Windows, it
+also no longer needs to share a process-wide event loop with the
+dashboard the way the (abandoned) combined-window approach did: the
+overlay runs on its own thread with its own plain Win32 message loop,
+and the dashboard goes back to being an ordinary, independent
+`eframe::run_native` call on the main thread - the same shape as Linux,
+just with a native window standing in for the Wayland layer-shell
+surface. Dragging, hot-reload, always-on-top, and the three test
+buttons all work the same way they do everywhere else.
 
-One such runtime quirk did turn up on a real Windows run: the overlay's
-text showed up on a solid black box instead of a transparent background.
-First attempt at a fix (requesting transparency on the dashboard's own
-viewport too, since both windows share one process-wide graphics context)
-turned out not to be enough - the real cause runs deeper than that.
-Plain OpenGL ("glow", the render backend Linux uses) simply cannot
-produce a window with real per-pixel transparency on Windows, full stop:
-DWM always treats an OpenGL window's swap chain as fully opaque, no
-matter what alpha value gets rendered into it. This isn't a bug in
-hpwarn's own code, or something fixable by requesting transparency
-harder - it's a long-standing, widely-documented limitation of OpenGL
-on Windows specifically (X11 and Wayland don't have this problem, which
-is why the overlay was already working correctly there).
+macOS (if anyone ever builds this there) is left on the earlier
+combined-dashboard-and-overlay-in-one-process approach, since Core
+Animation doesn't have Windows' transparency problem and nothing in
+this app has ever actually been run on a Mac to say otherwise.
 
-The actual fix: Windows and macOS builds now use the `wgpu` render
-backend instead of `glow` (Linux keeps `glow`, unaffected and unchanged).
-`wgpu`'s DX12/Vulkan backends use DXGI's "flip model" swap chains, which
-*do* support a transparent composite mode on Windows. Both backends still
-share one transparency flag across all of a run's windows (so the
-dashboard's own viewport still has to request "transparent" for the
-overlay to get it, same as before), and the dashboard still pins its own
-background to fully opaque in code either way, so it keeps looking
-exactly as solid as it always has - only the overlay actually becomes
-see-through.
+One thing I still haven't been able to verify myself: I don't have a
+Windows machine, and the sandbox I'm building this in blocks installing
+the Windows Rust target (`rustup target add x86_64-pc-windows-gnu`
+fails there due to a network policy restriction on
+`static.rust-lang.org`), so none of `src/win_overlay.rs` could be
+compile-checked here - not even a cross-compile. I checked every Win32
+call's exact signature against the `windows` crate's own source instead
+of relying on memory, which is as far as I could verify this without a
+real Windows build. If `cargo build --release` hits a compile error, or
+the app builds but something about the overlay looks wrong at runtime,
+let me know exactly what you see.
 
 ### Giving it a proper icon (Linux)
 
@@ -355,8 +351,10 @@ outside hpwarn's control but is normally well under a second.
 - `src/watcher.rs` — file tailing, HP-crossing / beep-trigger logic, and history/curve recording.
 - `src/state.rs` — state shared between the watcher thread and the UI windows (HP%, history, curve, config knobs).
 - `src/audio.rs` — synthesizes the warning tone (no external sound file).
-- `src/overlay.rs` — the plain transparent draggable overlay window (X11, or Wayland fallback).
-- `src/wayland_overlay.rs` — the native Wayland `wlr-layer-shell` overlay.
+- `src/overlay.rs` — the plain transparent draggable overlay window (X11, or Wayland/macOS fallback).
+- `src/wayland_overlay.rs` — the native Wayland `wlr-layer-shell` overlay (Linux only).
+- `src/win_overlay.rs` — the native Win32 layered-window overlay (Windows only).
+- `src/text_canvas.rs` — shared software text rendering used by the two native overlays above.
 - `src/dashboard.rs` — the default always-on window: configuration + HP history/curve.
 - `src/configure.rs` — the `--configure`-only lightweight settings window.
 - `src/config.rs` — config file (TOML) load/save/defaults.
